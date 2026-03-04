@@ -1,0 +1,14 @@
+exclude:
+  - "vendor"
+  - "*_test.go"
+  - "*.pb.go"
+  - "scripts"
+  - "docs"
+
+rules:
+  R01: "warning"  # Interface contracts (exported interfaces, unexported structs)
+  R02: "error"    # Interface usage (no pointer-to-interface anti-patterns)
+  R03: "warning"  # Constructor patterns (returning interfaces)
+  R04: "info"     # Domain boundaries (clean layer separation)
+  R05: "error"    # Centralized configuration (internal/config package)
+  R06: "error"    # Systematic error handling (internal/errors package)

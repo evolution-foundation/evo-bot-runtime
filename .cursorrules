@@ -1,0 +1,41 @@
+# Go Code Style Guide
+
+> This code style is based on the pragmatism of the Go way from GOPL with more complete concepts of OOP and clean architecture.
+
+## Project Structure
+
+The project follows a clean architecture approach with clear separation of concerns. The root structure is organized as follows:
+
+```
+.
+├── cmd/                    # Application entry points
+│   └── api/               # Main API server
+│       └── main.go        # Server initialization and configuration
+├── internal/              # Private application code
+│   ├── config/           # Configuration management
+│   ├── errors/           # Error definitions and handling
+│   └── types/            # Shared types and utilities if needed
+├── pkg/                   # Public packages and domain modules
+└── go.mod                 # Go module definition
+```
+
+### Module Definition
+
+The `go.mod` file must follow these conventions:
+
+```go
+module github.com/nex-prospect/nex-core-service
+
+go 1.23
+
+require (
+    // dependencies
+)
+```
+
+- Module name must match the repository path
+- Go version must be 1.23 or higher
+- Dependencies should be explicitly versioned
+- The dependencies should not be added manually, but by the `go mod tidy` or `go get` commands
+
+For complete style guide, see: https://github.com/gomessguii/gear

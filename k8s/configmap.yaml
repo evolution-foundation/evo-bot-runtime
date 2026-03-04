@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evo-bot-runtime-config
+data:
+  LISTEN_ADDR: ":8080"
+  AI_PROCESSOR_URL: "http://ai-processor:8000"
+  AI_CALL_TIMEOUT_SECONDS: "30"
