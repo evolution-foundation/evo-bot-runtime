@@ -45,7 +45,9 @@ func (m *mockRepo) TimerExists(_ context.Context, _, _ int64) (bool, error)     
 func (m *mockRepo) AcquireLock(_ context.Context, _, _ int64) (repository.Mutex, error) {
 	return nil, nil
 }
-func (m *mockRepo) ScanStates(_ context.Context) ([]model.PairID, error) { return nil, nil }
+func (m *mockRepo) ScanStates(_ context.Context, _ int) ([]model.PairID, error) {
+	return nil, nil
+}
 func (m *mockRepo) Ping(_ context.Context) error                         { return m.pingErr }
 
 // mockSvc satisfies pipelineService.PipelineService for handler tests.
@@ -212,15 +214,60 @@ func TestHandleEvent_400_OnMalformedJSON(t *testing.T) {
 }
 
 func TestHandleEvent_400_OnMissingRequiredFields(t *testing.T) {
-	r := setupRouter(&mockRepo{}, &mockSvc{})
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader([]byte(`{}`)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Bot-Runtime-Secret", testSecret)
-	r.ServeHTTP(w, req)
+	cases := []struct {
+		name    string
+		payload string
+		wantErr string
+	}{
+		{
+			name:    "empty body",
+			payload: `{}`,
+			wantErr: "contact_id must be > 0",
+		},
+		{
+			name:    "missing conversation_id",
+			payload: `{"contact_id":1,"postback_url":"http://x"}`,
+			wantErr: "conversation_id must be > 0",
+		},
+		{
+			name:    "missing postback_url",
+			payload: `{"contact_id":1,"conversation_id":2}`,
+			wantErr: "postback_url is required",
+		},
+		{
+			name:    "negative debounce_time",
+			payload: `{"contact_id":1,"conversation_id":2,"postback_url":"http://x","bot_config":{"debounce_time":-1}}`,
+			wantErr: "debounce_time must be >= 0",
+		},
+		{
+			name:    "segmentation enabled but limit zero",
+			payload: `{"contact_id":1,"conversation_id":2,"postback_url":"http://x","bot_config":{"text_segmentation_enabled":true}}`,
+			wantErr: "text_segmentation_limit must be > 0 when segmentation is enabled",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := setupRouter(&mockRepo{}, &mockSvc{})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader([]byte(tc.payload)))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Bot-Runtime-Secret", testSecret)
+			r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusAccepted {
-		t.Errorf("status: got %d, want %d (zero-value event is accepted by current schema)", w.Code, http.StatusAccepted)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status: got %d, want %d", w.Code, http.StatusBadRequest)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("invalid JSON response: %v", err)
+			}
+			if body["error"] != tc.wantErr {
+				t.Errorf("body.error: got %q, want %q", body["error"], tc.wantErr)
+			}
+			if body["code"] != "ERR_INVALID_EVENT" {
+				t.Errorf("body.code: got %q, want %q", body["code"], "ERR_INVALID_EVENT")
+			}
+		})
 	}
 }
 

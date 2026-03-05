@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,7 +58,8 @@ func (s *pipelineService) Start() error {
 	ctx := context.Background()
 
 	// Step 1: Recover state from Redis before starting ticker (NFR-01).
-	pairs, err := s.repo.ScanStates(ctx)
+	const maxRecoveryPairs = 10_000
+	pairs, err := s.repo.ScanStates(ctx, maxRecoveryPairs)
 	if err != nil {
 		return fmt.Errorf("pipeline.start.scan_states: %w", err)
 	}
@@ -273,7 +275,14 @@ func (s *pipelineService) launchAIStage(contactID, conversationID int64, buffer 
 		)
 		return
 	}
-	entry := v.(pipelineEntry)
+	entry, ok := v.(pipelineEntry)
+	if !ok {
+		slog.Error("pipeline.ai.entry_type_mismatch",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+		)
+		return
+	}
 	go s.runAIStage(entry.ctx, contactID, conversationID, buffer, entry.cfg, entry.postbackURL)
 }
 
@@ -308,36 +317,39 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 				"contact_id", contactID,
 				"conversation_id", conversationID,
 			)
-			_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+			s.clearStateWithLog(contactID, conversationID)
 		default:
 			slog.Error("pipeline.ai.error",
 				"contact_id", contactID,
 				"conversation_id", conversationID,
 				"error", fmt.Errorf("pipeline.ai: %w", err),
 			)
-			_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+			s.clearStateWithLog(contactID, conversationID)
 		}
 		return
 	}
 
-	// Success path — use context.Background() for Redis calls: pipeline ctx may be cancelled.
-	durMs := time.Since(start).Milliseconds()
+	// Success path — use cleanupCtx() for Redis calls: pipeline ctx may be cancelled.
+	dur := time.Since(start)
 
 	newState := &model.PipelineState{Stage: model.StageDispatch, CreatedAt: time.Now()}
-	if err := s.repo.SetState(context.Background(), contactID, conversationID, newState); err != nil {
+	setCtx, setCancel := cleanupCtx()
+	setErr := s.repo.SetState(setCtx, contactID, conversationID, newState)
+	setCancel()
+	if setErr != nil {
 		slog.Error("pipeline.ai.set_dispatch_failed",
 			"contact_id", contactID,
 			"conversation_id", conversationID,
-			"error", err,
+			"error", setErr,
 		)
-		_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+		s.clearStateWithLog(contactID, conversationID)
 		return
 	}
 
 	slog.Info("pipeline.ai.completed",
 		"contact_id", contactID,
 		"conversation_id", conversationID,
-		"duration_ms", durMs,
+		"duration", dur.String(),
 	)
 	s.launchDispatchStage(ctx, contactID, conversationID, resp, cfg, postbackURL)
 }
@@ -392,22 +404,30 @@ func (s *pipelineService) runDispatchStage(
 				"conversation_id", conversationID,
 				"error",           err,
 			)
-			_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+			s.clearStateWithLog(contactID, conversationID)
 		}
 		return
 	}
 
 	// Success: SetState(StageDone) → ClearState → entries.Delete → log
-	durMs := time.Since(start).Milliseconds()
+	dur := time.Since(start)
 	doneState := &model.PipelineState{Stage: model.StageDone, CreatedAt: time.Now()}
-	_ = s.repo.SetState(context.Background(), contactID, conversationID, doneState)
-	_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+	doneCtx, doneCancel := cleanupCtx()
+	if err := s.repo.SetState(doneCtx, contactID, conversationID, doneState); err != nil {
+		slog.Warn("pipeline.dispatch.set_done_failed",
+			"contact_id",      contactID,
+			"conversation_id", conversationID,
+			"error",           err,
+		)
+	}
+	doneCancel()
+	s.clearStateWithLog(contactID, conversationID)
 	s.entries.Delete(pairKey(contactID, conversationID))
 
 	slog.Info("pipeline.dispatch.completed",
 		"contact_id",      contactID,
 		"conversation_id", conversationID,
-		"duration_ms",     durMs,
+		"duration",        dur.String(),
 	)
 }
 
@@ -419,7 +439,14 @@ func (s *pipelineService) pollDebounceExpiry() {
 
 	for range ticker.C {
 		s.entries.Range(func(k, v any) bool {
-			entry := v.(pipelineEntry)
+			entry, ok := v.(pipelineEntry)
+			if !ok {
+				return true
+			}
+			key, ok := k.(string)
+			if !ok {
+				return true
+			}
 
 			// Skip cancelled pipelines.
 			select {
@@ -428,7 +455,7 @@ func (s *pipelineService) pollDebounceExpiry() {
 			default:
 			}
 
-			contactID, conversationID := parsePairKey(k.(string))
+			contactID, conversationID := parsePairKey(key)
 			if contactID == 0 {
 				return true
 			}
@@ -455,19 +482,15 @@ func (s *pipelineService) pollDebounceExpiry() {
 func (s *pipelineService) cancelPair(contactID, conversationID int64) {
 	key := pairKey(contactID, conversationID)
 	if v, ok := s.entries.LoadAndDelete(key); ok {
-		v.(pipelineEntry).cancel()
+		if entry, ok := v.(pipelineEntry); ok {
+			entry.cancel()
+		}
 	}
 }
 
 func (s *pipelineService) Cancel(contactID, conversationID int64) error {
 	s.cancelPair(contactID, conversationID)
-	if err := s.repo.ClearState(context.Background(), contactID, conversationID); err != nil {
-		slog.Warn("pipeline.cancel.clear_state_failed",
-			"contact_id", contactID,
-			"conversation_id", conversationID,
-			"error", err,
-		)
-	}
+	s.clearStateWithLog(contactID, conversationID)
 	return nil
 }
 
@@ -478,9 +501,32 @@ func (s *pipelineService) recoverPipeline(contactID, conversationID int64) {
 			"contact_id", contactID,
 			"conversation_id", conversationID,
 			"panic", r,
+			"stack", string(debug.Stack()),
 		)
-		_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+		s.clearStateWithLog(contactID, conversationID)
 		s.entries.Delete(pairKey(contactID, conversationID))
+	}
+}
+
+// cleanupCtx returns a context with a 5-second timeout for best-effort cleanup
+// calls (ClearState, SetState) that run after the pipeline context is cancelled
+// or after a failure. Prevents these calls from hanging indefinitely.
+func cleanupCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
+}
+
+// clearStateWithLog calls ClearState and logs a warning if it fails.
+// Used in all goroutine error/cleanup paths where the error is non-actionable
+// but should not be silently swallowed.
+func (s *pipelineService) clearStateWithLog(contactID, conversationID int64) {
+	ctx, cancel := cleanupCtx()
+	defer cancel()
+	if err := s.repo.ClearState(ctx, contactID, conversationID); err != nil {
+		slog.Warn("pipeline.cleanup.clear_state_failed",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+			"error", err,
+		)
 	}
 }
 

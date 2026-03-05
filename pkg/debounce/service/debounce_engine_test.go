@@ -10,28 +10,14 @@ import (
 	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/EvolutionAPI/evo-bot-runtime/internal/testhelpers"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/debounce/service"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/repository"
 )
 
-const testDB = 1 // dedicated Redis DB for debounce/service tests
-
-func testRedisOptions() *redis.Options {
-	url := os.Getenv("REDIS_URL")
-	if url == "" {
-		url = "redis://localhost:6379"
-	}
-	opt, err := redis.ParseURL(url)
-	if err != nil {
-		panic("invalid REDIS_URL: " + err.Error())
-	}
-	opt.DB = testDB
-	return opt
-}
-
 func TestMain(m *testing.M) {
-	rdb := redis.NewClient(testRedisOptions())
+	rdb := redis.NewClient(testhelpers.RedisOptions())
 	rdb.FlushDB(context.Background())
 	rdb.Close()
 	os.Exit(m.Run())
@@ -39,7 +25,7 @@ func TestMain(m *testing.M) {
 
 func newTestRedisClient(t *testing.T) *redis.Client {
 	t.Helper()
-	return redis.NewClient(testRedisOptions())
+	return redis.NewClient(testhelpers.RedisOptions())
 }
 
 func setupEngine(t *testing.T) (service.DebounceEngine, *redis.Client) {

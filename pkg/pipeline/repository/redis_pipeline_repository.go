@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -89,8 +90,8 @@ func (r *redisPipelineRepository) AcquireLock(ctx context.Context, contactID, co
 	return mutex, nil
 }
 
-func (r *redisPipelineRepository) ScanStates(ctx context.Context) ([]model.PairID, error) {
-	var pairs []model.PairID
+func (r *redisPipelineRepository) ScanStates(ctx context.Context, maxPairs int) ([]model.PairID, error) {
+	pairs := make([]model.PairID, 0, min(maxPairs, 256))
 	var cursor uint64
 	for {
 		keys, next, err := r.rdb.Scan(ctx, cursor, "bot_runtime:state:*", 100).Result()
@@ -98,6 +99,12 @@ func (r *redisPipelineRepository) ScanStates(ctx context.Context) ([]model.PairI
 			return nil, fmt.Errorf("pipeline.repository.scan_states: %w", err)
 		}
 		for _, key := range keys {
+			if len(pairs) >= maxPairs {
+				slog.Warn("pipeline.repository.scan_states.limit_reached",
+					"max", maxPairs,
+				)
+				return pairs, nil
+			}
 			// Format: bot_runtime:state:{contactID}:{conversationID}
 			parts := strings.Split(key, ":")
 			if len(parts) != 4 {

@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
+	"github.com/EvolutionAPI/evo-bot-runtime/internal/testhelpers"
 	aiIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
 	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
 	debounceService "github.com/EvolutionAPI/evo-bot-runtime/pkg/debounce/service"
@@ -80,23 +81,8 @@ func (m *mockFailLockRepo) AcquireLock(_ context.Context, _, _ int64) (repositor
 
 // --- setup ---
 
-const testDB = 2 // dedicated Redis DB for pipeline/service tests
-
-func testRedisOptions() *redis.Options {
-	url := os.Getenv("REDIS_URL")
-	if url == "" {
-		url = "redis://localhost:6379"
-	}
-	opt, err := redis.ParseURL(url)
-	if err != nil {
-		panic("invalid REDIS_URL: " + err.Error())
-	}
-	opt.DB = testDB
-	return opt
-}
-
 func TestMain(m *testing.M) {
-	rdb := redis.NewClient(testRedisOptions())
+	rdb := redis.NewClient(testhelpers.RedisOptions())
 	rdb.FlushDB(context.Background())
 	rdb.Close()
 	os.Exit(m.Run())
@@ -104,7 +90,7 @@ func TestMain(m *testing.M) {
 
 func newTestRedisClient(t *testing.T) *redis.Client {
 	t.Helper()
-	return redis.NewClient(testRedisOptions())
+	return redis.NewClient(testhelpers.RedisOptions())
 }
 
 func setupRealRepo(t *testing.T) repository.PipelineRepository {

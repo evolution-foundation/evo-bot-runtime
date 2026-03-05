@@ -48,6 +48,13 @@ func (h *Handler) handleEvent(c *gin.Context) {
 		})
 		return
 	}
+	if err := event.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+			"code":  "ERR_INVALID_EVENT",
+		})
+		return
+	}
 
 	// Persist StageIncoming BEFORE returning 202 (NFR-01).
 	// Guarantees event durability if the process goroutine never runs.

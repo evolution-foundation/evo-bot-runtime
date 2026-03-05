@@ -13,27 +13,13 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
+	"github.com/EvolutionAPI/evo-bot-runtime/internal/testhelpers"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/repository"
 )
 
-const testDB = 3 // dedicated Redis DB for pipeline/repository tests
-
-func testRedisOptions() *redis.Options {
-	url := os.Getenv("REDIS_URL")
-	if url == "" {
-		url = "redis://localhost:6379"
-	}
-	opt, err := redis.ParseURL(url)
-	if err != nil {
-		panic("invalid REDIS_URL: " + err.Error())
-	}
-	opt.DB = testDB
-	return opt
-}
-
 func TestMain(m *testing.M) {
-	rdb := redis.NewClient(testRedisOptions())
+	rdb := redis.NewClient(testhelpers.RedisOptions())
 	rdb.FlushDB(context.Background())
 	rdb.Close()
 	os.Exit(m.Run())
@@ -41,11 +27,11 @@ func TestMain(m *testing.M) {
 
 func setupTestRepo(t *testing.T) (repository.PipelineRepository, func()) {
 	t.Helper()
-	rdb := redis.NewClient(testRedisOptions())
+	rdb := redis.NewClient(testhelpers.RedisOptions())
 
 	ctx := context.Background()
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		t.Skipf("Redis not available (REDIS_URL=%s): %v", os.Getenv("REDIS_URL"), err)
+		t.Skipf("Redis not available: %v", err)
 	}
 
 	pool := goredis.NewPool(rdb)
