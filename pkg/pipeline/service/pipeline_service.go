@@ -1,0 +1,500 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
+	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
+	aiIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
+	debounceIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/debounce/service"
+	dispatchIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/dispatch/service"
+	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
+	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/repository"
+)
+
+// PipelineService orchestrates the per-pair pipeline state machine.
+type PipelineService interface {
+	Process(ctx context.Context, event *model.MessageEvent) error
+	Cancel(contactID, conversationID int64) error
+	Start() error
+}
+
+type pipelineEntry struct {
+	ctx         context.Context
+	cancel      context.CancelFunc
+	cfg         model.BotConfig // carries BotConfig from MessageEvent to dispatch stage
+	postbackURL string          // carries PostbackURL from MessageEvent to dispatch stage
+}
+
+type pipelineService struct {
+	repo        repository.PipelineRepository
+	debounce    debounceIface.DebounceEngine
+	aiAdapter   aiIface.AIAdapter
+	dispatchEng dispatchIface.DispatchEngine
+	entries     sync.Map // string → pipelineEntry
+}
+
+// NewPipelineService constructs the service. Returns interface (GEAR R03).
+func NewPipelineService(
+	repo        repository.PipelineRepository,
+	debounce    debounceIface.DebounceEngine,
+	aiAdapter   aiIface.AIAdapter,
+	dispatchEng dispatchIface.DispatchEngine,
+) PipelineService {
+	return &pipelineService{repo: repo, debounce: debounce, aiAdapter: aiAdapter, dispatchEng: dispatchEng}
+}
+
+// Start recovers in-progress debounce pairs from Redis, then launches the single
+// polling goroutine that detects timer expiry (AC: #1, #4).
+func (s *pipelineService) Start() error {
+	ctx := context.Background()
+
+	// Step 1: Recover state from Redis before starting ticker (NFR-01).
+	pairs, err := s.repo.ScanStates(ctx)
+	if err != nil {
+		return fmt.Errorf("pipeline.start.scan_states: %w", err)
+	}
+
+	for _, pair := range pairs {
+		state, err := s.repo.GetState(ctx, pair.ContactID, pair.ConversationID)
+		if err != nil || state == nil || state.Stage != model.StageDebounce {
+			continue
+		}
+		// Recreate entry only if not already in memory (avoids overwriting cancel funcs
+		// for pairs that received a Process call concurrently with Start recovery).
+		key := pairKey(pair.ContactID, pair.ConversationID)
+		if _, alreadyExists := s.entries.Load(key); !alreadyExists {
+			pipelineCtx, cancel := context.WithCancel(context.Background())
+			s.entries.Store(key, pipelineEntry{ctx: pipelineCtx, cancel: cancel})
+		}
+
+		// If timer already expired during the restart window → advance immediately.
+		timerExists, err := s.repo.TimerExists(ctx, pair.ContactID, pair.ConversationID)
+		if err == nil && !timerExists {
+			s.advanceToAI(pair.ContactID, pair.ConversationID)
+		}
+	}
+
+	// Step 2: Start single polling goroutine (AC: #1 — only timer-detection mechanism).
+	go s.pollDebounceExpiry()
+	return nil
+}
+
+func (s *pipelineService) Process(ctx context.Context, event *model.MessageEvent) error {
+	mu, err := s.repo.AcquireLock(ctx, event.ContactID, event.ConversationID)
+	if err != nil {
+		return brtErrors.ErrLockFailed
+	}
+	defer mu.Unlock()
+
+	state, err := s.repo.GetState(ctx, event.ContactID, event.ConversationID)
+	if err != nil {
+		return fmt.Errorf("pipeline.process.get_state: %w", err)
+	}
+
+	switch {
+	case state == nil || state.Stage == model.StageIncoming:
+		if event.BotConfig.DebounceTime == 0 {
+			return s.skipDebounce(ctx, event)
+		}
+		return s.startDebounce(ctx, event)
+	case state.Stage == model.StageDebounce:
+		return s.resetDebounce(ctx, event)
+	case state.Stage == model.StageAI || state.Stage == model.StageDispatch:
+		s.cancelPair(event.ContactID, event.ConversationID)
+		if err := s.repo.ClearState(ctx, event.ContactID, event.ConversationID); err != nil {
+			return fmt.Errorf("pipeline.process.clear: %w", err)
+		}
+		slog.Info(fmt.Sprintf("pipeline.%s.interrupt", state.Stage),
+			"contact_id", event.ContactID,
+			"conversation_id", event.ConversationID,
+		)
+		if event.BotConfig.DebounceTime == 0 {
+			return s.skipDebounce(ctx, event)
+		}
+		return s.startDebounce(ctx, event)
+	}
+	return nil
+}
+
+func (s *pipelineService) startDebounce(ctx context.Context, event *model.MessageEvent) error {
+	pipelineCtx, cancel := context.WithCancel(context.Background())
+	key := pairKey(event.ContactID, event.ConversationID)
+	s.entries.Store(key, pipelineEntry{
+		ctx:         pipelineCtx,
+		cancel:      cancel,
+		cfg:         event.BotConfig,
+		postbackURL: event.PostbackURL,
+	})
+
+	if err := s.debounce.Start(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.BotConfig); err != nil {
+		cancel()
+		s.entries.Delete(key)
+		return fmt.Errorf("pipeline.debounce.start: %w", err)
+	}
+
+	newState := &model.PipelineState{Stage: model.StageDebounce, CreatedAt: time.Now()}
+	if err := s.repo.SetState(ctx, event.ContactID, event.ConversationID, newState); err != nil {
+		cancel()
+		s.entries.Delete(key)
+		return fmt.Errorf("pipeline.state.set: %w", err)
+	}
+
+	slog.Info("pipeline.debounce.started",
+		"contact_id", event.ContactID,
+		"conversation_id", event.ConversationID,
+		"debounce_ms", event.BotConfig.DebounceTime*1000,
+	)
+	return nil
+}
+
+// skipDebounce handles DebounceTime == 0: appends to buffer, advances directly to StageAI (FR-09).
+func (s *pipelineService) skipDebounce(ctx context.Context, event *model.MessageEvent) error {
+	pipelineCtx, cancel := context.WithCancel(context.Background())
+	key := pairKey(event.ContactID, event.ConversationID)
+	s.entries.Store(key, pipelineEntry{
+		ctx:         pipelineCtx,
+		cancel:      cancel,
+		cfg:         event.BotConfig,
+		postbackURL: event.PostbackURL,
+	})
+
+	// debounce.Start appends to buffer; DebounceTime=0 means no timer (Story 2.1).
+	if err := s.debounce.Start(ctx, event.ContactID, event.ConversationID,
+		event.MessageContent, event.BotConfig); err != nil {
+		cancel()
+		s.entries.Delete(key)
+		return fmt.Errorf("pipeline.skip_debounce.start: %w", err)
+	}
+
+	buffer, err := s.debounce.GetBuffer(ctx, event.ContactID, event.ConversationID)
+	if err != nil {
+		cancel()
+		s.entries.Delete(key)
+		return fmt.Errorf("pipeline.skip_debounce.get_buffer: %w", err)
+	}
+
+	newState := &model.PipelineState{Stage: model.StageAI, CreatedAt: time.Now()}
+	if err := s.repo.SetState(ctx, event.ContactID, event.ConversationID, newState); err != nil {
+		cancel()
+		s.entries.Delete(key)
+		return fmt.Errorf("pipeline.skip_debounce.set_state: %w", err)
+	}
+
+	slog.Info("pipeline.debounce.skipped",
+		"contact_id", event.ContactID,
+		"conversation_id", event.ConversationID,
+	)
+	s.launchAIStage(event.ContactID, event.ConversationID, buffer)
+	return nil
+}
+
+func (s *pipelineService) resetDebounce(ctx context.Context, event *model.MessageEvent) error {
+	if err := s.debounce.Reset(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.BotConfig); err != nil {
+		return fmt.Errorf("pipeline.debounce.reset: %w", err)
+	}
+	slog.Info("pipeline.debounce.reset",
+		"contact_id", event.ContactID,
+		"conversation_id", event.ConversationID,
+	)
+	return nil
+}
+
+// advanceToAI acquires the lock and transitions the pair from StageDebounce to StageAI.
+// Double-check under lock prevents races with concurrent Process calls (NFR-02).
+func (s *pipelineService) advanceToAI(contactID, conversationID int64) {
+	ctx := context.Background()
+
+	mu, err := s.repo.AcquireLock(ctx, contactID, conversationID)
+	if err != nil {
+		// Another instance beat us — skip (exactly-once guarantee holds).
+		return
+	}
+	defer mu.Unlock()
+
+	// Re-check state under lock — may have changed since we detected expiry.
+	state, err := s.repo.GetState(ctx, contactID, conversationID)
+	if err != nil || state == nil || state.Stage != model.StageDebounce {
+		return
+	}
+
+	// Re-check timer — may have been reset by a new message arriving concurrently.
+	exists, err := s.repo.TimerExists(ctx, contactID, conversationID)
+	if err != nil || exists {
+		return // Timer reset — let it expire again naturally.
+	}
+
+	buffer, err := s.debounce.GetBuffer(ctx, contactID, conversationID)
+	if err != nil {
+		slog.Error("pipeline.debounce.get_buffer_failed",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+			"error", err,
+		)
+		return
+	}
+
+	newState := &model.PipelineState{Stage: model.StageAI, CreatedAt: time.Now()}
+	if err := s.repo.SetState(ctx, contactID, conversationID, newState); err != nil {
+		slog.Error("pipeline.debounce.set_ai_state_failed",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+			"error", err,
+		)
+		return
+	}
+
+	slog.Info("pipeline.debounce.expired",
+		"contact_id", contactID,
+		"conversation_id", conversationID,
+		"buffer_len", len(buffer),
+	)
+	s.launchAIStage(contactID, conversationID, buffer)
+}
+
+// launchAIStage launches the AI goroutine with the stored pipeline context.
+// Must be called only after pipelineEntry is stored in s.entries (guaranteed by
+// startDebounce/skipDebounce/advanceToAI).
+func (s *pipelineService) launchAIStage(contactID, conversationID int64, buffer string) {
+	key := pairKey(contactID, conversationID)
+	v, ok := s.entries.Load(key)
+	if !ok {
+		// Should not happen — entry stored before this is called.
+		slog.Error("pipeline.ai.no_entry",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+		)
+		return
+	}
+	entry := v.(pipelineEntry)
+	go s.runAIStage(entry.ctx, contactID, conversationID, buffer, entry.cfg, entry.postbackURL)
+}
+
+// runAIStage is the AI stage goroutine body. ctx is pipelineEntry.ctx — cancelled by
+// Process when a new message arrives for the same pair.
+func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversationID int64, buffer string, cfg model.BotConfig, postbackURL string) {
+	defer s.recoverPipeline(contactID, conversationID)
+
+	slog.Info("pipeline.ai.started",
+		"contact_id", contactID,
+		"conversation_id", conversationID,
+	)
+	start := time.Now()
+
+	resp, err := s.aiAdapter.Call(ctx, &aiModel.A2ARequest{
+		Message:        buffer,
+		ContactID:      contactID,
+		ConversationID: conversationID,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, brtErrors.ErrPipelineCancelled):
+			// Expected: new message arrived, Process already set StageDebounce.
+			// Do NOT call ClearState — would destroy the new active state.
+			slog.Info("pipeline.ai.cancelled",
+				"contact_id", contactID,
+				"conversation_id", conversationID,
+			)
+		case errors.Is(err, brtErrors.ErrAITimeout):
+			// AI backend did not respond in time — clear state for fresh start.
+			slog.Warn("pipeline.ai.timeout",
+				"contact_id", contactID,
+				"conversation_id", conversationID,
+			)
+			_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+		default:
+			slog.Error("pipeline.ai.error",
+				"contact_id", contactID,
+				"conversation_id", conversationID,
+				"error", fmt.Errorf("pipeline.ai: %w", err),
+			)
+			_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+		}
+		return
+	}
+
+	// Success path — use context.Background() for Redis calls: pipeline ctx may be cancelled.
+	durMs := time.Since(start).Milliseconds()
+
+	newState := &model.PipelineState{Stage: model.StageDispatch, CreatedAt: time.Now()}
+	if err := s.repo.SetState(context.Background(), contactID, conversationID, newState); err != nil {
+		slog.Error("pipeline.ai.set_dispatch_failed",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+			"error", err,
+		)
+		_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+		return
+	}
+
+	slog.Info("pipeline.ai.completed",
+		"contact_id", contactID,
+		"conversation_id", conversationID,
+		"duration_ms", durMs,
+	)
+	s.launchDispatchStage(ctx, contactID, conversationID, resp, cfg, postbackURL)
+}
+
+// launchDispatchStage launches the dispatch goroutine.
+func (s *pipelineService) launchDispatchStage(
+	ctx            context.Context,
+	contactID      int64,
+	conversationID int64,
+	resp           *aiModel.NormalizedResponse,
+	cfg            model.BotConfig,
+	postbackURL    string,
+) {
+	go s.runDispatchStage(ctx, contactID, conversationID, resp.Content, cfg, postbackURL)
+}
+
+// runDispatchStage is the dispatch stage goroutine body. ctx is pipelineEntry.ctx — cancelled by
+// Process when a new message arrives for the same pair.
+func (s *pipelineService) runDispatchStage(
+	ctx            context.Context,
+	contactID      int64,
+	conversationID int64,
+	content        string,
+	cfg            model.BotConfig,
+	postbackURL    string,
+) {
+	defer s.recoverPipeline(contactID, conversationID)
+
+	slog.Info("pipeline.dispatch.started",
+		"contact_id",      contactID,
+		"conversation_id", conversationID,
+	)
+	start := time.Now()
+
+	err := s.dispatchEng.Dispatch(ctx, contactID, conversationID, content, cfg, postbackURL)
+	if err != nil {
+		switch {
+		case errors.Is(err, brtErrors.ErrDispatchInterrupted):
+			// New message arrived — Process already set StageDebounce.
+			// Do NOT call ClearState: would destroy the new active state.
+			slog.Info("pipeline.dispatch.cancelled",
+				"contact_id",      contactID,
+				"conversation_id", conversationID,
+			)
+			// Entry already removed by cancelPair (LoadAndDelete) — this delete is
+			// idempotent; it guards against future refactors where cancelPair may not
+			// delete the entry from s.entries.
+			s.entries.Delete(pairKey(contactID, conversationID))
+		default:
+			slog.Error("pipeline.dispatch.error",
+				"contact_id",      contactID,
+				"conversation_id", conversationID,
+				"error",           err,
+			)
+			_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+		}
+		return
+	}
+
+	// Success: SetState(StageDone) → ClearState → entries.Delete → log
+	durMs := time.Since(start).Milliseconds()
+	doneState := &model.PipelineState{Stage: model.StageDone, CreatedAt: time.Now()}
+	_ = s.repo.SetState(context.Background(), contactID, conversationID, doneState)
+	_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+	s.entries.Delete(pairKey(contactID, conversationID))
+
+	slog.Info("pipeline.dispatch.completed",
+		"contact_id",      contactID,
+		"conversation_id", conversationID,
+		"duration_ms",     durMs,
+	)
+}
+
+// pollDebounceExpiry is the single timer-detection mechanism (AC: #1).
+// It runs a 100ms ticker and advances expired StageDebounce pairs to StageAI.
+func (s *pipelineService) pollDebounceExpiry() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.entries.Range(func(k, v any) bool {
+			entry := v.(pipelineEntry)
+
+			// Skip cancelled pipelines.
+			select {
+			case <-entry.ctx.Done():
+				return true
+			default:
+			}
+
+			contactID, conversationID := parsePairKey(k.(string))
+			if contactID == 0 {
+				return true
+			}
+
+			// Only process StageDebounce pairs.
+			state, err := s.repo.GetState(entry.ctx, contactID, conversationID)
+			if err != nil || state == nil || state.Stage != model.StageDebounce {
+				return true
+			}
+
+			// Check if timer expired.
+			exists, err := s.repo.TimerExists(entry.ctx, contactID, conversationID)
+			if err != nil || exists {
+				return true // Still running.
+			}
+
+			// Timer expired — advance to AI (acquires lock internally).
+			s.advanceToAI(contactID, conversationID)
+			return true
+		})
+	}
+}
+
+func (s *pipelineService) cancelPair(contactID, conversationID int64) {
+	key := pairKey(contactID, conversationID)
+	if v, ok := s.entries.LoadAndDelete(key); ok {
+		v.(pipelineEntry).cancel()
+	}
+}
+
+func (s *pipelineService) Cancel(contactID, conversationID int64) error {
+	s.cancelPair(contactID, conversationID)
+	if err := s.repo.ClearState(context.Background(), contactID, conversationID); err != nil {
+		slog.Warn("pipeline.cancel.clear_state_failed",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+			"error", err,
+		)
+	}
+	return nil
+}
+
+// recoverPipeline is deferred in every pipeline goroutine to handle panics safely.
+func (s *pipelineService) recoverPipeline(contactID, conversationID int64) {
+	if r := recover(); r != nil {
+		slog.Error("pipeline.panic.recovered",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+			"panic", r,
+		)
+		_ = s.repo.ClearState(context.Background(), contactID, conversationID)
+		s.entries.Delete(pairKey(contactID, conversationID))
+	}
+}
+
+func pairKey(contactID, conversationID int64) string {
+	return fmt.Sprintf("%d:%d", contactID, conversationID)
+}
+
+// parsePairKey is the inverse of pairKey.
+func parsePairKey(key string) (contactID, conversationID int64) {
+	parts := strings.SplitN(key, ":", 2)
+	if len(parts) != 2 {
+		return 0, 0
+	}
+	contactID, _ = strconv.ParseInt(parts[0], 10, 64)
+	conversationID, _ = strconv.ParseInt(parts[1], 10, 64)
+	return
+}

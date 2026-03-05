@@ -28,5 +28,9 @@ type PipelineRepository interface {
 
 	AcquireLock(ctx context.Context, contactID, conversationID int64) (Mutex, error)
 
+	// ScanStates returns all contactID+conversationID pairs that have a state key in Redis.
+	// Used by PipelineService.Start() for recovery after restart (NFR-01).
+	ScanStates(ctx context.Context) ([]model.PairID, error)
+
 	Ping(ctx context.Context) error
 }

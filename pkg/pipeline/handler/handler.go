@@ -10,15 +10,17 @@ import (
 
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/repository"
+	pipelineService "github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/service"
 )
 
 type Handler struct {
 	repo   repository.PipelineRepository
+	svc    pipelineService.PipelineService
 	secret string
 }
 
-func NewHandler(repo repository.PipelineRepository, secret string) *Handler {
-	return &Handler{repo: repo, secret: secret}
+func NewHandler(repo repository.PipelineRepository, svc pipelineService.PipelineService, secret string) *Handler {
+	return &Handler{repo: repo, svc: svc, secret: secret}
 }
 
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
@@ -47,12 +49,10 @@ func (h *Handler) handleEvent(c *gin.Context) {
 		return
 	}
 
-	// Persist initial state BEFORE returning 202 (NFR-01)
-	initialState := &model.PipelineState{
-		Stage:     model.StageDebounce,
-		CreatedAt: time.Now(),
-	}
-	if err := h.repo.SetState(c.Request.Context(), event.ContactID, event.ConversationID, initialState); err != nil {
+	// Persist StageIncoming BEFORE returning 202 (NFR-01).
+	// Guarantees event durability if the process goroutine never runs.
+	incomingState := &model.PipelineState{Stage: model.StageIncoming, CreatedAt: time.Now()}
+	if err := h.repo.SetState(c.Request.Context(), event.ContactID, event.ConversationID, incomingState); err != nil {
 		slog.Error("pipeline.event.state_persist_failed",
 			"contact_id", event.ContactID,
 			"conversation_id", event.ConversationID,
@@ -65,18 +65,17 @@ func (h *Handler) handleEvent(c *gin.Context) {
 		return
 	}
 
-	// Launch pipeline processing — stub goroutine (replaced in Story 2.2)
-	go h.processPipelineStub(context.Background(), event)
+	go h.runProcess(event)
 
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
 }
 
-// processPipelineStub is the placeholder pipeline goroutine.
-// Story 2.2 replaces this with: go pipelineSvc.Process(ctx, event)
-// context.Background() is used here because the goroutine outlives the HTTP request context.
-func (h *Handler) processPipelineStub(_ context.Context, event model.MessageEvent) {
-	slog.Info("pipeline.event.received",
-		"contact_id", event.ContactID,
-		"conversation_id", event.ConversationID,
-	)
+func (h *Handler) runProcess(event model.MessageEvent) {
+	if err := h.svc.Process(context.Background(), &event); err != nil {
+		slog.Error("pipeline.process.failed",
+			"contact_id", event.ContactID,
+			"conversation_id", event.ConversationID,
+			"error", err,
+		)
+	}
 }

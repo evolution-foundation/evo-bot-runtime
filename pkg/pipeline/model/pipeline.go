@@ -6,11 +6,18 @@ import "time"
 type Stage string
 
 const (
+	StageIncoming Stage = "incoming" // written by handler before 202; ensures NFR-01 durability
 	StageDebounce Stage = "debounce"
 	StageAI       Stage = "ai"
 	StageDispatch Stage = "dispatch"
 	StageDone     Stage = "done"
 )
+
+// PairID identifies a contact+conversation pair for recovery and scanning.
+type PairID struct {
+	ContactID      int64
+	ConversationID int64
+}
 
 // PipelineState is what is stored in Redis (JSON-serializable).
 // The cancel func is NOT stored here — it lives in PipelineService memory (Story 2.2).

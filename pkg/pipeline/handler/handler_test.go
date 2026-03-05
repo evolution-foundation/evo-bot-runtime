@@ -15,10 +15,10 @@ import (
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/handler"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/repository"
+	pipelineService "github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/service"
 )
 
 // mockRepo satisfies repository.PipelineRepository for handler tests.
-// Inline struct — no mock framework (GEAR pattern).
 type mockRepo struct {
 	setStateCalled bool
 	setStateErr    error
@@ -45,14 +45,24 @@ func (m *mockRepo) TimerExists(_ context.Context, _, _ int64) (bool, error)     
 func (m *mockRepo) AcquireLock(_ context.Context, _, _ int64) (repository.Mutex, error) {
 	return nil, nil
 }
-func (m *mockRepo) Ping(_ context.Context) error { return m.pingErr }
+func (m *mockRepo) ScanStates(_ context.Context) ([]model.PairID, error) { return nil, nil }
+func (m *mockRepo) Ping(_ context.Context) error                         { return m.pingErr }
+
+// mockSvc satisfies pipelineService.PipelineService for handler tests.
+type mockSvc struct{ processErr error }
+
+func (m *mockSvc) Process(_ context.Context, _ *model.MessageEvent) error { return m.processErr }
+func (m *mockSvc) Cancel(_, _ int64) error                                { return nil }
+func (m *mockSvc) Start() error                                           { return nil }
+
+var _ pipelineService.PipelineService = (*mockSvc)(nil)
 
 const testSecret = "test-secret"
 
-func setupRouter(repo repository.PipelineRepository) *gin.Engine {
+func setupRouter(repo repository.PipelineRepository, svc pipelineService.PipelineService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	hdl := handler.NewHandler(repo, testSecret)
+	hdl := handler.NewHandler(repo, svc, testSecret)
 	hdl.RegisterRoutes(r)
 	return r
 }
@@ -80,7 +90,7 @@ func validPayload() []byte {
 
 func TestHandleEvent_202_OnValidRequest(t *testing.T) {
 	mock := &mockRepo{}
-	r := setupRouter(mock)
+	r := setupRouter(mock, &mockSvc{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader(validPayload()))
@@ -99,12 +109,52 @@ func TestHandleEvent_202_OnValidRequest(t *testing.T) {
 		t.Errorf("body.status: got %q, want %q", body["status"], "accepted")
 	}
 	if !mock.setStateCalled {
-		t.Error("state must be persisted before 202 is sent")
+		t.Error("StageIncoming state must be persisted before 202 is sent (NFR-01)")
+	}
+}
+
+func TestHandleEvent_500_OnSetStateError(t *testing.T) {
+	mock := &mockRepo{setStateErr: errors.New("redis write failed")}
+	r := setupRouter(mock, &mockSvc{})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader(validPayload()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bot-Runtime-Secret", testSecret)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response body is not valid JSON: %v", err)
+	}
+	if body["error"] != "internal error" {
+		t.Errorf("body.error: got %q, want %q", body["error"], "internal error")
+	}
+	if body["code"] != "ERR_INTERNAL" {
+		t.Errorf("body.code: got %q, want %q", body["code"], "ERR_INTERNAL")
+	}
+}
+
+func TestHandleEvent_202_EvenWhenProcessFails(t *testing.T) {
+	// Process runs in a goroutine — its errors must not affect the HTTP response.
+	r := setupRouter(&mockRepo{}, &mockSvc{processErr: errors.New("process error")})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader(validPayload()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bot-Runtime-Secret", testSecret)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusAccepted)
 	}
 }
 
 func TestHandleEvent_401_OnMissingSecret(t *testing.T) {
-	r := setupRouter(&mockRepo{})
+	r := setupRouter(&mockRepo{}, &mockSvc{})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader(validPayload()))
 	req.Header.Set("Content-Type", "application/json")
@@ -126,7 +176,7 @@ func TestHandleEvent_401_OnMissingSecret(t *testing.T) {
 }
 
 func TestHandleEvent_401_OnWrongSecret(t *testing.T) {
-	r := setupRouter(&mockRepo{})
+	r := setupRouter(&mockRepo{}, &mockSvc{})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader(validPayload()))
 	req.Header.Set("Content-Type", "application/json")
@@ -139,7 +189,7 @@ func TestHandleEvent_401_OnWrongSecret(t *testing.T) {
 }
 
 func TestHandleEvent_400_OnMalformedJSON(t *testing.T) {
-	r := setupRouter(&mockRepo{})
+	r := setupRouter(&mockRepo{}, &mockSvc{})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader([]byte(`{invalid}`)))
 	req.Header.Set("Content-Type", "application/json")
@@ -162,27 +212,20 @@ func TestHandleEvent_400_OnMalformedJSON(t *testing.T) {
 }
 
 func TestHandleEvent_400_OnMissingRequiredFields(t *testing.T) {
-	r := setupRouter(&mockRepo{})
+	r := setupRouter(&mockRepo{}, &mockSvc{})
 	w := httptest.NewRecorder()
-	// Empty JSON object — missing all required fields; contact_id and conversation_id will be zero
-	// but gin's ShouldBindJSON accepts zero values unless binding:"required" is set.
-	// This test validates the payload is parseable but semantically empty (zero IDs).
 	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader([]byte(`{}`)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Bot-Runtime-Secret", testSecret)
 	r.ServeHTTP(w, req)
 
-	// With zero-value fields, SetState is called with contactID=0, conversationID=0 and returns 202.
-	// The pipeline model uses int64 with no binding:"required" — empty object is a valid (zero) event.
-	// This test documents current behaviour; field-level validation is a Story 2.x concern.
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status: got %d, want %d (zero-value event is accepted by current schema)", w.Code, http.StatusAccepted)
 	}
 }
 
 func TestHealth_200_WhenRedisReachable(t *testing.T) {
-	mock := &mockRepo{pingErr: nil}
-	r := setupRouter(mock)
+	r := setupRouter(&mockRepo{pingErr: nil}, &mockSvc{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -201,8 +244,7 @@ func TestHealth_200_WhenRedisReachable(t *testing.T) {
 }
 
 func TestHealth_503_WhenRedisUnreachable(t *testing.T) {
-	mock := &mockRepo{pingErr: errors.New("connection refused")}
-	r := setupRouter(mock)
+	r := setupRouter(&mockRepo{pingErr: errors.New("connection refused")}, &mockSvc{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -220,30 +262,5 @@ func TestHealth_503_WhenRedisUnreachable(t *testing.T) {
 	}
 	if body["detail"] != "redis unreachable" {
 		t.Errorf("body.detail: got %q, want %q", body["detail"], "redis unreachable")
-	}
-}
-
-func TestHandleEvent_500_OnSetStateError(t *testing.T) {
-	mock := &mockRepo{setStateErr: errors.New("redis write failed")}
-	r := setupRouter(mock)
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewReader(validPayload()))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Bot-Runtime-Secret", testSecret)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("status: got %d, want %d", w.Code, http.StatusInternalServerError)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("response body is not valid JSON: %v", err)
-	}
-	if body["error"] != "internal error" {
-		t.Errorf("body.error: got %q, want %q", body["error"], "internal error")
-	}
-	if body["code"] != "ERR_INTERNAL" {
-		t.Errorf("body.code: got %q, want %q", body["code"], "ERR_INTERNAL")
 	}
 }

@@ -17,22 +17,35 @@ import (
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/repository"
 )
 
-func redisAddr() string {
-	if v := os.Getenv("REDIS_URL"); v != "" {
-		return v
+const testDB = 3 // dedicated Redis DB for pipeline/repository tests
+
+func testRedisOptions() *redis.Options {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		url = "redis://localhost:6379"
 	}
-	return "localhost:6379"
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		panic("invalid REDIS_URL: " + err.Error())
+	}
+	opt.DB = testDB
+	return opt
+}
+
+func TestMain(m *testing.M) {
+	rdb := redis.NewClient(testRedisOptions())
+	rdb.FlushDB(context.Background())
+	rdb.Close()
+	os.Exit(m.Run())
 }
 
 func setupTestRepo(t *testing.T) (repository.PipelineRepository, func()) {
 	t.Helper()
-	rdb := redis.NewClient(&redis.Options{
-		Addr: redisAddr(),
-	})
+	rdb := redis.NewClient(testRedisOptions())
 
 	ctx := context.Background()
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		t.Skipf("Redis not available at %s: %v", redisAddr(), err)
+		t.Skipf("Redis not available (REDIS_URL=%s): %v", os.Getenv("REDIS_URL"), err)
 	}
 
 	pool := goredis.NewPool(rdb)

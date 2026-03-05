@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-redsync/redsync/v4"
@@ -85,6 +87,35 @@ func (r *redisPipelineRepository) AcquireLock(ctx context.Context, contactID, co
 		return nil, brtErrors.ErrLockFailed
 	}
 	return mutex, nil
+}
+
+func (r *redisPipelineRepository) ScanStates(ctx context.Context) ([]model.PairID, error) {
+	var pairs []model.PairID
+	var cursor uint64
+	for {
+		keys, next, err := r.rdb.Scan(ctx, cursor, "bot_runtime:state:*", 100).Result()
+		if err != nil {
+			return nil, fmt.Errorf("pipeline.repository.scan_states: %w", err)
+		}
+		for _, key := range keys {
+			// Format: bot_runtime:state:{contactID}:{conversationID}
+			parts := strings.Split(key, ":")
+			if len(parts) != 4 {
+				continue
+			}
+			contactID, err1 := strconv.ParseInt(parts[2], 10, 64)
+			convID, err2 := strconv.ParseInt(parts[3], 10, 64)
+			if err1 != nil || err2 != nil {
+				continue
+			}
+			pairs = append(pairs, model.PairID{ContactID: contactID, ConversationID: convID})
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return pairs, nil
 }
 
 func (r *redisPipelineRepository) Ping(ctx context.Context) error {
