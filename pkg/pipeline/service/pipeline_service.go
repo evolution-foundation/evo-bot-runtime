@@ -25,6 +25,9 @@ type PipelineService interface {
 	Process(ctx context.Context, event *model.MessageEvent) error
 	Cancel(contactID, conversationID int64) error
 	Start() error
+	// Shutdown stops the polling goroutine and cancels all in-flight pipeline
+	// contexts. It blocks until the poller exits or ctx is cancelled.
+	Shutdown(ctx context.Context)
 }
 
 type pipelineEntry struct {
@@ -39,7 +42,9 @@ type pipelineService struct {
 	debounce    debounceIface.DebounceEngine
 	aiAdapter   aiIface.AIAdapter
 	dispatchEng dispatchIface.DispatchEngine
-	entries     sync.Map // string → pipelineEntry
+	entries     sync.Map      // string → pipelineEntry
+	stopCh      chan struct{}  // closed by Shutdown to stop pollDebounceExpiry
+	stoppedCh   chan struct{}  // closed by pollDebounceExpiry when it exits
 }
 
 // NewPipelineService constructs the service. Returns interface (GEAR R03).
@@ -49,7 +54,14 @@ func NewPipelineService(
 	aiAdapter   aiIface.AIAdapter,
 	dispatchEng dispatchIface.DispatchEngine,
 ) PipelineService {
-	return &pipelineService{repo: repo, debounce: debounce, aiAdapter: aiAdapter, dispatchEng: dispatchEng}
+	return &pipelineService{
+		repo:        repo,
+		debounce:    debounce,
+		aiAdapter:   aiAdapter,
+		dispatchEng: dispatchEng,
+		stopCh:      make(chan struct{}),
+		stoppedCh:   make(chan struct{}),
+	}
 }
 
 // Start recovers in-progress debounce pairs from Redis, then launches the single
@@ -433,11 +445,19 @@ func (s *pipelineService) runDispatchStage(
 
 // pollDebounceExpiry is the single timer-detection mechanism (AC: #1).
 // It runs a 100ms ticker and advances expired StageDebounce pairs to StageAI.
+// It exits when s.stopCh is closed and signals s.stoppedCh before returning.
 func (s *pipelineService) pollDebounceExpiry() {
+	defer close(s.stoppedCh)
+
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+		}
 		s.entries.Range(func(k, v any) bool {
 			entry, ok := v.(pipelineEntry)
 			if !ok {
@@ -492,6 +512,27 @@ func (s *pipelineService) Cancel(contactID, conversationID int64) error {
 	s.cancelPair(contactID, conversationID)
 	s.clearStateWithLog(contactID, conversationID)
 	return nil
+}
+
+// Shutdown stops the polling goroutine and cancels all in-flight pipeline
+// contexts. It blocks until the poller exits or ctx is cancelled.
+func (s *pipelineService) Shutdown(ctx context.Context) {
+	// Cancel all in-flight pipeline goroutines.
+	s.entries.Range(func(k, v any) bool {
+		if entry, ok := v.(pipelineEntry); ok {
+			entry.cancel()
+		}
+		return true
+	})
+
+	// Signal poller to stop and wait for it to exit.
+	close(s.stopCh)
+	select {
+	case <-s.stoppedCh:
+		slog.Info("pipeline.shutdown.complete")
+	case <-ctx.Done():
+		slog.Warn("pipeline.shutdown.timeout")
+	}
 }
 
 // recoverPipeline is deferred in every pipeline goroutine to handle panics safely.

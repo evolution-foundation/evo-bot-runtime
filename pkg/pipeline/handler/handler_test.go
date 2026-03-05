@@ -56,6 +56,7 @@ type mockSvc struct{ processErr error }
 func (m *mockSvc) Process(_ context.Context, _ *model.MessageEvent) error { return m.processErr }
 func (m *mockSvc) Cancel(_, _ int64) error                                { return nil }
 func (m *mockSvc) Start() error                                           { return nil }
+func (m *mockSvc) Shutdown(_ context.Context)                             {}
 
 var _ pipelineService.PipelineService = (*mockSvc)(nil)
 

@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net/http"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redsync/redsync/v4"
@@ -63,9 +68,28 @@ func main() {
 	r.Use(gin.Recovery())
 	handler.RegisterRoutes(r)
 
-	// Step 10: start server
-	log.Printf("evo-bot-runtime starting on %s", cfg.ListenAddr)
-	if err := r.Run(cfg.ListenAddr); err != nil {
-		log.Fatalf("server failed: %v", err)
+	// Step 10: start server (non-blocking)
+	srv := &http.Server{Addr: cfg.ListenAddr, Handler: r}
+	go func() {
+		log.Printf("evo-bot-runtime starting on %s", cfg.ListenAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	// Step 11: wait for SIGTERM or SIGINT
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	<-ctx.Done()
+	log.Printf("evo-bot-runtime shutting down")
+
+	// Step 12: graceful shutdown — 10s budget for in-flight HTTP requests
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
 	}
+
+	// Step 13: stop pipeline (cancel in-flight goroutines, drain poller)
+	pipeline.Shutdown(shutdownCtx)
 }
