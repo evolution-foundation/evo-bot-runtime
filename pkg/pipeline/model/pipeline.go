@@ -24,9 +24,13 @@ type PairID struct {
 
 // PipelineState is what is stored in Redis (JSON-serializable).
 // The cancel func is NOT stored here — it lives in PipelineService memory (Story 2.2).
+// BotConfig and PostbackURL are persisted for StageDebounce so that the service can
+// reconstruct the pipelineEntry correctly after a restart (NFR-01 recovery).
 type PipelineState struct {
-	Stage     Stage     `json:"stage"`
-	CreatedAt time.Time `json:"created_at"`
+	Stage       Stage     `json:"stage"`
+	CreatedAt   time.Time `json:"created_at"`
+	BotConfig   BotConfig `json:"bot_config,omitempty"`
+	PostbackURL string    `json:"postback_url,omitempty"`
 }
 
 // MessageEvent is the inbound payload from evo-ai-crm AgentBotListener.

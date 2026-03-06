@@ -45,6 +45,7 @@ type pipelineService struct {
 	entries     sync.Map      // string → pipelineEntry
 	stopCh      chan struct{}  // closed by Shutdown to stop pollDebounceExpiry
 	stoppedCh   chan struct{}  // closed by pollDebounceExpiry when it exits
+	stopOnce    sync.Once     // ensures stopCh is closed exactly once
 }
 
 // NewPipelineService constructs the service. Returns interface (GEAR R03).
@@ -86,7 +87,12 @@ func (s *pipelineService) Start() error {
 		key := pairKey(pair.ContactID, pair.ConversationID)
 		if _, alreadyExists := s.entries.Load(key); !alreadyExists {
 			pipelineCtx, cancel := context.WithCancel(context.Background())
-			s.entries.Store(key, pipelineEntry{ctx: pipelineCtx, cancel: cancel})
+			s.entries.Store(key, pipelineEntry{
+				ctx:         pipelineCtx,
+				cancel:      cancel,
+				cfg:         state.BotConfig,
+				postbackURL: state.PostbackURL,
+			})
 		}
 
 		// If timer already expired during the restart window → advance immediately.
@@ -115,6 +121,12 @@ func (s *pipelineService) Process(ctx context.Context, event *model.MessageEvent
 
 	switch {
 	case state == nil || state.Stage == model.StageIncoming:
+		// The HTTP handler always writes StageIncoming before launching the Process
+		// goroutine (NFR-01 durability). When two events for the same pair arrive
+		// rapidly, the second handler call overwrites any active StageAI/StageDispatch
+		// with StageIncoming before this goroutine runs — bypassing the interrupt
+		// branch below. cancelPair is a no-op when no entry exists.
+		s.cancelPair(event.ContactID, event.ConversationID)
 		if event.BotConfig.DebounceTime == 0 {
 			return s.skipDebounce(ctx, event)
 		}
@@ -154,7 +166,14 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		return fmt.Errorf("pipeline.debounce.start: %w", err)
 	}
 
-	newState := &model.PipelineState{Stage: model.StageDebounce, CreatedAt: time.Now()}
+	// Persist BotConfig and PostbackURL alongside the stage so that Start()
+	// recovery after a restart can reconstruct the pipelineEntry correctly (NFR-01).
+	newState := &model.PipelineState{
+		Stage:       model.StageDebounce,
+		CreatedAt:   time.Now(),
+		BotConfig:   event.BotConfig,
+		PostbackURL: event.PostbackURL,
+	}
 	if err := s.repo.SetState(ctx, event.ContactID, event.ConversationID, newState); err != nil {
 		cancel()
 		s.entries.Delete(key)
@@ -402,14 +421,13 @@ func (s *pipelineService) runDispatchStage(
 		case errors.Is(err, brtErrors.ErrDispatchInterrupted):
 			// New message arrived — Process already set StageDebounce.
 			// Do NOT call ClearState: would destroy the new active state.
+			// Do NOT call entries.Delete: cancelPair already did LoadAndDelete
+			// atomically. A Delete here would race with the new event's Store
+			// and could delete the replacement entry.
 			slog.Info("pipeline.dispatch.cancelled",
 				"contact_id",      contactID,
 				"conversation_id", conversationID,
 			)
-			// Entry already removed by cancelPair (LoadAndDelete) — this delete is
-			// idempotent; it guards against future refactors where cancelPair may not
-			// delete the entry from s.entries.
-			s.entries.Delete(pairKey(contactID, conversationID))
 		default:
 			slog.Error("pipeline.dispatch.error",
 				"contact_id",      contactID,
@@ -516,6 +534,8 @@ func (s *pipelineService) Cancel(contactID, conversationID int64) error {
 
 // Shutdown stops the polling goroutine and cancels all in-flight pipeline
 // contexts. It blocks until the poller exits or ctx is cancelled.
+// Safe to call multiple times — subsequent calls are no-ops for the stop signal
+// but still wait for the poller to finish if it hasn't already.
 func (s *pipelineService) Shutdown(ctx context.Context) {
 	// Cancel all in-flight pipeline goroutines.
 	s.entries.Range(func(k, v any) bool {
@@ -525,8 +545,9 @@ func (s *pipelineService) Shutdown(ctx context.Context) {
 		return true
 	})
 
-	// Signal poller to stop and wait for it to exit.
-	close(s.stopCh)
+	// Signal poller to stop exactly once — close on a closed channel panics.
+	s.stopOnce.Do(func() { close(s.stopCh) })
+
 	select {
 	case <-s.stoppedCh:
 		slog.Info("pipeline.shutdown.complete")
