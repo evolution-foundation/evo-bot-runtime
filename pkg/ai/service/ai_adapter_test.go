@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,37 +17,61 @@ import (
 
 func TestCall_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Errorf("Authorization = %q, want %q", got, "Bearer test-key")
+		// Verify X-API-Key header (per-event auth)
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
 		}
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Errorf("Content-Type = %q, want application/json", got)
 		}
 
-		var req aiModel.A2ARequest
+		// Verify URL path contains agent_bot_id
+		if !strings.HasSuffix(r.URL.Path, "/api/v1/a2a/agent-123") {
+			t.Errorf("URL path = %q, want suffix /api/v1/a2a/agent-123", r.URL.Path)
+		}
+
+		// Verify JSON-RPC 2.0 envelope
+		var req aiModel.JSONRPCRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode request body: %v", err)
 		}
-		if req.Message != "hello world" {
-			t.Errorf("req.Message = %q, want %q", req.Message, "hello world")
+		if req.JSONRPC != "2.0" {
+			t.Errorf("req.JSONRPC = %q, want %q", req.JSONRPC, "2.0")
 		}
-		// ContactID/ConversationID must NOT appear in the serialised JSON payload.
-		if req.ContactID != 0 || req.ConversationID != 0 {
-			t.Errorf("json:- fields leaked into payload: contact_id=%d conversation_id=%d",
-				req.ContactID, req.ConversationID)
+		if req.Method != "message/send" {
+			t.Errorf("req.Method = %q, want %q", req.Method, "message/send")
+		}
+		if req.Params.ContextID != "7" {
+			t.Errorf("req.Params.ContextID = %q, want %q", req.Params.ContextID, "7")
+		}
+		if req.Params.UserID != "42" {
+			t.Errorf("req.Params.UserID = %q, want %q", req.Params.UserID, "42")
+		}
+		if len(req.Params.Message.Parts) != 1 || req.Params.Message.Parts[0].Text != "hello world" {
+			t.Errorf("message parts = %+v, want single part with text 'hello world'", req.Params.Message.Parts)
 		}
 
-		if err := json.NewEncoder(w).Encode(aiModel.A2AResponse{Content: "AI response here"}); err != nil {
+		// Return JSON-RPC 2.0 response with artifacts format
+		resp := aiModel.A2AResponse{
+			Result: &aiModel.A2AResult{
+				Artifacts: []aiModel.A2AArtifact{
+					{Parts: []aiModel.A2APart{{Type: "text", Text: "AI response here"}}},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			t.Errorf("encode response: %v", err)
 		}
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(server.URL, "test-key", 30)
+	adapter := aiService.NewAIAdapter(server.URL, 30)
 	resp, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
+		AgentBotID:     "agent-123",
 		Message:        "hello world",
 		ContactID:      42,
 		ConversationID: 7,
+		ApiKey:         "test-key",
 	})
 	if err != nil {
 		t.Fatalf("Call returned unexpected error: %v", err)
@@ -56,9 +81,35 @@ func TestCall_Success(t *testing.T) {
 	}
 }
 
+func TestCall_Success_MessageFormat(t *testing.T) {
+	// Test the fallback response format (result.message instead of result.artifacts)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := aiModel.A2AResponse{
+			Result: &aiModel.A2AResult{
+				Message: &aiModel.A2AMessage{
+					Parts: []aiModel.A2APart{{Type: "text", Text: "message format response"}},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	adapter := aiService.NewAIAdapter(server.URL, 30)
+	resp, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
+		AgentBotID: "bot-1",
+		Message:    "test",
+		ApiKey:     "key",
+	})
+	if err != nil {
+		t.Fatalf("Call returned unexpected error: %v", err)
+	}
+	if resp.Content != "message format response" {
+		t.Errorf("resp.Content = %q, want %q", resp.Content, "message format response")
+	}
+}
+
 func TestCall_ContextCancellation_ReturnsPipelineCancelled(t *testing.T) {
-	// unblock is closed by t.Cleanup to guarantee the handler exits even if
-	// r.Context().Done() is not immediately triggered by the client disconnect.
 	unblock := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -71,7 +122,7 @@ func TestCall_ContextCancellation_ReturnsPipelineCancelled(t *testing.T) {
 		server.Close()
 	})
 
-	adapter := aiService.NewAIAdapter(server.URL, "key", 30)
+	adapter := aiService.NewAIAdapter(server.URL, 30)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -79,15 +130,13 @@ func TestCall_ContextCancellation_ReturnsPipelineCancelled(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := adapter.Call(ctx, &aiModel.A2ARequest{Message: "test"})
+	_, err := adapter.Call(ctx, &aiModel.A2ARequest{AgentBotID: "bot-1", Message: "test", ApiKey: "key"})
 	if !errors.Is(err, brtErrors.ErrPipelineCancelled) {
 		t.Errorf("expected ErrPipelineCancelled, got %v", err)
 	}
 }
 
 func TestCall_Timeout_ReturnsAITimeout(t *testing.T) {
-	// unblock is closed by t.Cleanup so server.Close() does not block after
-	// the timeout assertion passes (avoids ~4s delay in test teardown).
 	unblock := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -100,8 +149,8 @@ func TestCall_Timeout_ReturnsAITimeout(t *testing.T) {
 		server.Close()
 	})
 
-	adapter := aiService.NewAIAdapter(server.URL, "key", 1) // 1 s timeout
-	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{Message: "test"})
+	adapter := aiService.NewAIAdapter(server.URL, 1) // 1 s timeout
+	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{AgentBotID: "bot-1", Message: "test", ApiKey: "key"})
 	if !errors.Is(err, brtErrors.ErrAITimeout) {
 		t.Errorf("expected ErrAITimeout, got %v", err)
 	}
@@ -113,8 +162,8 @@ func TestCall_NonOKStatus_ReturnsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(server.URL, "key", 30)
-	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{Message: "test"})
+	adapter := aiService.NewAIAdapter(server.URL, 30)
+	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{AgentBotID: "bot-1", Message: "test", ApiKey: "key"})
 	if err == nil {
 		t.Fatal("expected error for non-200 response, got nil")
 	}

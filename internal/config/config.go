@@ -10,8 +10,7 @@ type Config struct {
 	ListenAddr           string
 	RedisURL             string
 	BotRuntimeSecret     string
-	AIProcessorURL       string
-	AIProcessorAPIKey    string
+	AIProcessorBaseURL   string
 	AICallTimeoutSeconds int
 }
 
@@ -28,11 +27,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	aiProcessorURL, err := mustGetEnv("AI_PROCESSOR_URL")
-	if err != nil {
-		return nil, err
-	}
-	aiProcessorAPIKey, err := mustGetEnv("AI_PROCESSOR_API_KEY")
+	aiProcessorBaseURL, err := mustGetEnv("AI_PROCESSOR_BASE_URL")
 	if err != nil {
 		return nil, err
 	}
@@ -45,8 +40,7 @@ func Load() (*Config, error) {
 		ListenAddr:           listenAddr,
 		RedisURL:             redisURL,
 		BotRuntimeSecret:     botRuntimeSecret,
-		AIProcessorURL:       aiProcessorURL,
-		AIProcessorAPIKey:    aiProcessorAPIKey,
+		AIProcessorBaseURL:   aiProcessorBaseURL,
 		AICallTimeoutSeconds: aiCallTimeout,
 	}, nil
 }

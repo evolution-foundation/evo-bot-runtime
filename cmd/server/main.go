@@ -51,7 +51,7 @@ func main() {
 	debounce := debounceService.NewDebounceEngine(pipelineRepo)
 
 	// Step 6: AI adapter
-	aiAdapter := aiService.NewAIAdapter(cfg.AIProcessorURL, cfg.AIProcessorAPIKey, cfg.AICallTimeoutSeconds)
+	aiAdapter := aiService.NewAIAdapter(cfg.AIProcessorBaseURL, cfg.AICallTimeoutSeconds)
 
 	// Step 7: dispatch engine
 	dispatch := dispatchService.NewDispatchEngine()

@@ -75,7 +75,7 @@ func validPayload() []byte {
 		"agent_bot_id":    "bot-1",
 		"conversation_id": 42,
 		"contact_id":      7,
-		"message_id":      100,
+		"message_id":      "msg-100",
 		"message_content": "hello",
 		"postback_url":    "http://crm/postback",
 		"bot_config": map[string]any{

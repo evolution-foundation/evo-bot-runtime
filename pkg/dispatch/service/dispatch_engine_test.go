@@ -39,7 +39,7 @@ func collectParts(t *testing.T) (*httptest.Server, *[]string, *sync.Mutex) {
 	return server, &parts, &mu
 }
 
-func TestDispatch_MultiPart_SignatureOnLastOnly(t *testing.T) {
+func TestDispatch_MultiPart_SignatureOnFirstOnly(t *testing.T) {
 	server, partsPtr, mu := collectParts(t)
 
 	eng := service.NewDispatchEngine()
@@ -47,7 +47,7 @@ func TestDispatch_MultiPart_SignatureOnLastOnly(t *testing.T) {
 		TextSegmentationEnabled: true,
 		TextSegmentationLimit:   15, // forces multiple parts
 		TextSegmentationMinSize: 0,
-		MessageSignature:        " [bot]",
+		MessageSignature:        "[bot] ",
 		DelayPerCharacter:       0, // no delay — fast test
 	}
 
@@ -65,14 +65,14 @@ func TestDispatch_MultiPart_SignatureOnLastOnly(t *testing.T) {
 		t.Fatalf("segmentation must produce multiple parts, got %d", len(parts))
 	}
 
-	// Signature only on last part
-	for i, p := range parts[:len(parts)-1] {
-		if strings.Contains(p, " [bot]") {
-			t.Errorf("signature must NOT be on part %d: %q", i, p)
-		}
+	// Signature only on first part
+	if !strings.HasPrefix(parts[0], "[bot] ") {
+		t.Errorf("signature must be prepended to first part: %q", parts[0])
 	}
-	if !strings.HasSuffix(parts[len(parts)-1], " [bot]") {
-		t.Errorf("signature must be appended to last part: %q", parts[len(parts)-1])
+	for i, p := range parts[1:] {
+		if strings.Contains(p, "[bot]") {
+			t.Errorf("signature must NOT be on part %d: %q", i+1, p)
+		}
 	}
 }
 
@@ -82,7 +82,7 @@ func TestDispatch_NoSegmentation_SinglePart(t *testing.T) {
 	eng := service.NewDispatchEngine()
 	cfg := model.BotConfig{
 		TextSegmentationEnabled: false,
-		MessageSignature:        " —signature",
+		MessageSignature:        "—signature ",
 		DelayPerCharacter:       0,
 	}
 
@@ -98,7 +98,7 @@ func TestDispatch_NoSegmentation_SinglePart(t *testing.T) {
 	if len(parts) != 1 {
 		t.Fatalf("disabled segmentation must produce exactly one part, got %d", len(parts))
 	}
-	want := "full response here —signature"
+	want := "—signature full response here"
 	if parts[0] != want {
 		t.Errorf("parts[0] = %q, want %q", parts[0], want)
 	}

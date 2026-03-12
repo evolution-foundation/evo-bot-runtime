@@ -63,9 +63,9 @@ func (d *dispatchEngineImpl) Dispatch(
 ) error {
 	parts := segmentContent(content, cfg)
 
-	// Append signature to the last part only (FR-21)
+	// Prepend signature to the first part (FR-21)
 	if cfg.MessageSignature != "" && len(parts) > 0 {
-		parts[len(parts)-1] += cfg.MessageSignature
+		parts[0] = cfg.MessageSignature + parts[0]
 	}
 
 	start := time.Now()

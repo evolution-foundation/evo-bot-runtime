@@ -35,6 +35,8 @@ type pipelineEntry struct {
 	cancel      context.CancelFunc
 	cfg         model.BotConfig // carries BotConfig from MessageEvent to dispatch stage
 	postbackURL string          // carries PostbackURL from MessageEvent to dispatch stage
+	agentBotID  string          // carries AgentBotID from MessageEvent to AI stage
+	apiKey      string          // carries ApiKey from MessageEvent to AI stage
 }
 
 type pipelineService struct {
@@ -92,6 +94,8 @@ func (s *pipelineService) Start() error {
 				cancel:      cancel,
 				cfg:         state.BotConfig,
 				postbackURL: state.PostbackURL,
+				agentBotID:  state.AgentBotID,
+				apiKey:      state.ApiKey,
 			})
 		}
 
@@ -158,6 +162,8 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		cancel:      cancel,
 		cfg:         event.BotConfig,
 		postbackURL: event.PostbackURL,
+		agentBotID:  event.AgentBotID,
+		apiKey:      event.ApiKey,
 	})
 
 	if err := s.debounce.Start(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.BotConfig); err != nil {
@@ -166,13 +172,15 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		return fmt.Errorf("pipeline.debounce.start: %w", err)
 	}
 
-	// Persist BotConfig and PostbackURL alongside the stage so that Start()
-	// recovery after a restart can reconstruct the pipelineEntry correctly (NFR-01).
+	// Persist BotConfig, PostbackURL, AgentBotID and ApiKey alongside the stage so that
+	// Start() recovery after a restart can reconstruct the pipelineEntry correctly (NFR-01).
 	newState := &model.PipelineState{
 		Stage:       model.StageDebounce,
 		CreatedAt:   time.Now(),
 		BotConfig:   event.BotConfig,
 		PostbackURL: event.PostbackURL,
+		AgentBotID:  event.AgentBotID,
+		ApiKey:      event.ApiKey,
 	}
 	if err := s.repo.SetState(ctx, event.ContactID, event.ConversationID, newState); err != nil {
 		cancel()
@@ -197,6 +205,8 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 		cancel:      cancel,
 		cfg:         event.BotConfig,
 		postbackURL: event.PostbackURL,
+		agentBotID:  event.AgentBotID,
+		apiKey:      event.ApiKey,
 	})
 
 	// debounce.Start appends to buffer; DebounceTime=0 means no timer (Story 2.1).
@@ -328,10 +338,22 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 	)
 	start := time.Now()
 
+	// Retrieve agent_bot_id and api_key from the pipeline entry.
+	key := pairKey(contactID, conversationID)
+	var agentBotID, apiKey string
+	if v, ok := s.entries.Load(key); ok {
+		if entry, ok := v.(pipelineEntry); ok {
+			agentBotID = entry.agentBotID
+			apiKey = entry.apiKey
+		}
+	}
+
 	resp, err := s.aiAdapter.Call(ctx, &aiModel.A2ARequest{
-		Message:        buffer,
+		AgentBotID:     agentBotID,
 		ContactID:      contactID,
 		ConversationID: conversationID,
+		ApiKey:         apiKey,
+		Message:        buffer,
 	})
 	if err != nil {
 		switch {

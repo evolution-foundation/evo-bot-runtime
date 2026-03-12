@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/EvolutionAPI/evo-bot-runtime/internal/testhelpers"
+	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
 	aiService "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
 	debounceService "github.com/EvolutionAPI/evo-bot-runtime/pkg/debounce/service"
 	dispatchService "github.com/EvolutionAPI/evo-bot-runtime/pkg/dispatch/service"
@@ -73,9 +74,20 @@ func newMockAIServer() *mockAIServer {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "default response"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("default response")) //nolint:errcheck
 	}))
 	return m
+}
+
+// a2aResponse builds a JSON-RPC 2.0 A2A response with the given text content.
+func a2aResponse(text string) aiModel.A2AResponse {
+	return aiModel.A2AResponse{
+		Result: &aiModel.A2AResult{
+			Artifacts: []aiModel.A2AArtifact{
+				{Parts: []aiModel.A2APart{{Type: "text", Text: text}}},
+			},
+		},
+	}
 }
 
 func (m *mockAIServer) setHandler(fn http.HandlerFunc) {
@@ -207,7 +219,7 @@ func newHarness(t *testing.T) *harness {
 	rs := redsync.New(pool)
 	repo := repository.NewPipelineRepository(rdb, rs)
 	debounce := debounceService.NewDebounceEngine(repo)
-	ai := aiService.NewAIAdapter(aiSrv.URL, "test-api-key", 10)
+	ai := aiService.NewAIAdapter(aiSrv.URL, 10)
 	dispatch := dispatchService.NewDispatchEngine()
 	pipeline := pipelineService.NewPipelineService(repo, debounce, ai, dispatch)
 	if err := pipeline.Start(); err != nil {
@@ -259,7 +271,7 @@ func (h *harness) event(contactID, convID int64, content string, debounceTime in
 		AgentBotID:     "e2e-bot",
 		ContactID:      contactID,
 		ConversationID: convID,
-		MessageID:      1,
+		MessageID:      "e2e-msg-1",
 		MessageContent: content,
 		PostbackURL:    h.pbServer.URL,
 		BotConfig:      model.BotConfig{DebounceTime: debounceTime},
@@ -289,7 +301,7 @@ func TestE2E_FullHappyPath(t *testing.T) {
 
 	h.aiServer.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "hello from AI"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("hello from AI")) //nolint:errcheck
 	})
 
 	resp := h.postEvent(t, h.event(contactID, convID, "hello", 0))
@@ -321,13 +333,15 @@ func TestE2E_DebounceAggregation(t *testing.T) {
 
 	aiReceived := make(chan string, 1)
 	h.aiServer.setHandler(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Message string `json:"message"`
-		}
+		var req aiModel.JSONRPCRequest
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		aiReceived <- req.Message
+		msg := ""
+		if len(req.Params.Message.Parts) > 0 {
+			msg = req.Params.Message.Parts[0].Text
+		}
+		aiReceived <- msg
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "ok"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("ok")) //nolint:errcheck
 	})
 
 	h.postEvent(t, h.event(contactID, convID, "hello", 1)).Body.Close() // starts 1s debounce
@@ -403,7 +417,7 @@ func TestE2E_AIInterruption(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "event2 response"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("event2 response")) //nolint:errcheck
 	})
 
 	// event1: debounce=0 → pipeline enters AI stage immediately (AI blocks).
@@ -483,7 +497,7 @@ func TestE2E_ExactlyOnce_ConcurrentEvents(t *testing.T) {
 	// Fast AI: always responds immediately so at least one pipeline can complete.
 	h.aiServer.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "response"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("response")) //nolint:errcheck
 	})
 
 	// Release two goroutines simultaneously to maximise the chance of a concurrent
@@ -522,18 +536,20 @@ func TestE2E_PipelineIsolation(t *testing.T) {
 	pairAContact, pairAConv := nextPair()
 	pairBContact, pairBConv := nextPair()
 
-	// Route by message content — A2ARequest.Message carries MessageContent.
+	// Route by message content — JSON-RPC params.message.parts[0].text carries MessageContent.
 	h.aiServer.setHandler(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Message string `json:"message"`
-		}
+		var req aiModel.JSONRPCRequest
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		if req.Message == "pair-a" {
+		msg := ""
+		if len(req.Params.Message.Parts) > 0 {
+			msg = req.Params.Message.Parts[0].Text
+		}
+		if msg == "pair-a" {
 			http.Error(w, "AI error", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "pair-b response"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("pair-b response")) //nolint:errcheck
 	})
 
 	h.postEvent(t, h.event(pairAContact, pairAConv, "pair-a", 0)).Body.Close()
@@ -574,7 +590,7 @@ func TestE2E_DispatchSegmentation(t *testing.T) {
 	const aiResponse = "hello world foo bar"
 	h.aiServer.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": aiResponse}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse(aiResponse)) //nolint:errcheck
 	})
 
 	evt := h.event(contactID, convID, "trigger", 0)
@@ -623,7 +639,7 @@ func TestE2E_DispatchInterruption(t *testing.T) {
 	// DelayPerCharacter=100ms: "hi" (2 chars) → 200ms between part 1 and part 2.
 	h.aiServer.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "hi there world"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("hi there world")) //nolint:errcheck
 	})
 
 	evt1 := h.event(contactID, convID, "event1", 0)
@@ -641,7 +657,7 @@ func TestE2E_DispatchInterruption(t *testing.T) {
 	// This cancels event1's pipeline context → ErrDispatchInterrupted.
 	h.aiServer.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "event2 response"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("event2 response")) //nolint:errcheck
 	})
 	h.postEvent(t, h.event(contactID, convID, "event2", 0)).Body.Close()
 
@@ -693,12 +709,12 @@ func TestE2E_RecoveryAfterRestart(t *testing.T) {
 	rs := redsync.New(pool)
 	repo := repository.NewPipelineRepository(rdb, rs)
 	debounce := debounceService.NewDebounceEngine(repo)
-	ai := aiService.NewAIAdapter(aiSrv.URL, "test-api-key", 10)
+	ai := aiService.NewAIAdapter(aiSrv.URL, 10)
 	dispatch := dispatchService.NewDispatchEngine()
 
 	aiSrv.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "recovered response"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("recovered response")) //nolint:errcheck
 	})
 
 	newPipeline := func() pipelineService.PipelineService {
@@ -764,7 +780,7 @@ func TestE2E_PostbackFailure_StateCleared(t *testing.T) {
 
 	h.aiServer.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"content": "response"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse("response")) //nolint:errcheck
 	})
 
 	// Postback server returns 500 — dispatch should error and clear state.
