@@ -27,25 +27,29 @@ type PairID struct {
 // BotConfig and PostbackURL are persisted for StageDebounce so that the service can
 // reconstruct the pipelineEntry correctly after a restart (NFR-01 recovery).
 type PipelineState struct {
-	Stage       Stage     `json:"stage"`
-	CreatedAt   time.Time `json:"created_at"`
-	BotConfig   BotConfig `json:"bot_config,omitempty"`
-	PostbackURL string    `json:"postback_url,omitempty"`
-	AgentBotID  string    `json:"agent_bot_id,omitempty"`
-	ApiKey      string    `json:"api_key,omitempty"`
+	Stage        Stage     `json:"stage"`
+	CreatedAt    time.Time `json:"created_at"`
+	BotConfig    BotConfig `json:"bot_config,omitempty"`
+	PostbackURL  string    `json:"postback_url,omitempty"`
+	AgentBotID   string    `json:"agent_bot_id,omitempty"`
+	ApiKey       string    `json:"api_key,omitempty"`
+	OutgoingURL  string         `json:"outgoing_url,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 }
 
 // MessageEvent is the inbound payload from evo-ai-crm AgentBotListener.
 // All JSON tags are snake_case — matches the wire format exactly.
 type MessageEvent struct {
-	AgentBotID     string    `json:"agent_bot_id"`
-	ConversationID int64     `json:"conversation_id"`
-	ContactID      int64     `json:"contact_id"`
-	MessageID      string    `json:"message_id"`
-	MessageContent string    `json:"message_content"`
-	ApiKey         string    `json:"api_key"`
-	BotConfig      BotConfig `json:"bot_config"`
-	PostbackURL    string    `json:"postback_url"`
+	AgentBotID     string         `json:"agent_bot_id"`
+	ConversationID int64          `json:"conversation_id"`
+	ContactID      int64          `json:"contact_id"`
+	MessageID      string         `json:"message_id"`
+	MessageContent string         `json:"message_content"`
+	ApiKey         string         `json:"api_key"`
+	OutgoingURL    string         `json:"outgoing_url"`
+	BotConfig      BotConfig      `json:"bot_config"`
+	PostbackURL    string         `json:"postback_url"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
 }
 
 // BotConfig carries per-bot runtime configuration provided by the caller.

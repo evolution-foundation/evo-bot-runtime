@@ -3,7 +3,7 @@ package model
 // A2ARequest carries the data needed to call AI Processor via JSON-RPC 2.0.
 // Fields are NOT serialised directly — the adapter builds the wire format.
 type A2ARequest struct {
-	AgentBotID     string // used to construct URL path: /api/v1/a2a/{AgentBotID}
+	OutgoingURL    string // full A2A endpoint URL from agent_bot.outgoing_url
 	ContactID      int64  // used for userId in JSON-RPC params
 	ConversationID int64  // used for contextId in JSON-RPC params
 	ApiKey         string // used for X-API-Key header (per-event auth)

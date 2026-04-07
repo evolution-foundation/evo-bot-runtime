@@ -39,6 +39,7 @@ type postbackRequest struct {
 
 type dispatchEngineImpl struct {
 	client *http.Client
+	secret string
 }
 
 // postbackClientTimeout is the maximum time allowed for a single HTTP postback call.
@@ -46,10 +47,11 @@ type dispatchEngineImpl struct {
 const postbackClientTimeout = 30 * time.Second
 
 // NewDispatchEngine constructs the engine. Returns interface (GEAR R03).
-// postbackURL is passed per-call (in MessageEvent, not global config).
-func NewDispatchEngine() DispatchEngine {
+// secret is the BOT_RUNTIME_SECRET sent as X-Bot-Runtime-Secret header on postback.
+func NewDispatchEngine(secret string) DispatchEngine {
 	return &dispatchEngineImpl{
 		client: &http.Client{Timeout: postbackClientTimeout},
+		secret: secret,
 	}
 }
 
@@ -128,6 +130,9 @@ func (d *dispatchEngineImpl) sendPart(ctx context.Context, postbackURL, content 
 		return fmt.Errorf("new_request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if d.secret != "" {
+		req.Header.Set("X-Bot-Runtime-Secret", d.secret)
+	}
 
 	resp, err := d.client.Do(req)
 	if err != nil {

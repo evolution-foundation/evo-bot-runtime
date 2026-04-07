@@ -50,11 +50,11 @@ func main() {
 	// Step 5: debounce engine
 	debounce := debounceService.NewDebounceEngine(pipelineRepo)
 
-	// Step 6: AI adapter
-	aiAdapter := aiService.NewAIAdapter(cfg.AIProcessorBaseURL, cfg.AICallTimeoutSeconds)
+	// Step 6: AI adapter (URL comes from each event's outgoing_url)
+	aiAdapter := aiService.NewAIAdapter(cfg.AICallTimeoutSeconds)
 
-	// Step 7: dispatch engine
-	dispatch := dispatchService.NewDispatchEngine()
+	// Step 7: dispatch engine (sends secret header on postback to CRM)
+	dispatch := dispatchService.NewDispatchEngine(cfg.BotRuntimeSecret)
 
 	// Step 8: pipeline service
 	pipeline := pipelineService.NewPipelineService(pipelineRepo, debounce, aiAdapter, dispatch)

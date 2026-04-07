@@ -33,10 +33,11 @@ type PipelineService interface {
 type pipelineEntry struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
-	cfg         model.BotConfig // carries BotConfig from MessageEvent to dispatch stage
-	postbackURL string          // carries PostbackURL from MessageEvent to dispatch stage
-	agentBotID  string          // carries AgentBotID from MessageEvent to AI stage
-	apiKey      string          // carries ApiKey from MessageEvent to AI stage
+	cfg         model.BotConfig    // carries BotConfig from MessageEvent to dispatch stage
+	postbackURL string             // carries PostbackURL from MessageEvent to dispatch stage
+	outgoingURL string             // carries OutgoingURL (full A2A endpoint) from MessageEvent to AI stage
+	apiKey      string             // carries ApiKey from MessageEvent to AI stage
+	metadata    map[string]any     // carries Metadata from MessageEvent to AI stage (for tools context)
 }
 
 type pipelineService struct {
@@ -94,8 +95,9 @@ func (s *pipelineService) Start() error {
 				cancel:      cancel,
 				cfg:         state.BotConfig,
 				postbackURL: state.PostbackURL,
-				agentBotID:  state.AgentBotID,
+				outgoingURL: state.OutgoingURL,
 				apiKey:      state.ApiKey,
+				metadata:    state.Metadata,
 			})
 		}
 
@@ -162,7 +164,7 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		cancel:      cancel,
 		cfg:         event.BotConfig,
 		postbackURL: event.PostbackURL,
-		agentBotID:  event.AgentBotID,
+		outgoingURL: event.OutgoingURL,
 		apiKey:      event.ApiKey,
 	})
 
@@ -179,7 +181,7 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		CreatedAt:   time.Now(),
 		BotConfig:   event.BotConfig,
 		PostbackURL: event.PostbackURL,
-		AgentBotID:  event.AgentBotID,
+		OutgoingURL: event.OutgoingURL,
 		ApiKey:      event.ApiKey,
 	}
 	if err := s.repo.SetState(ctx, event.ContactID, event.ConversationID, newState); err != nil {
@@ -205,7 +207,7 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 		cancel:      cancel,
 		cfg:         event.BotConfig,
 		postbackURL: event.PostbackURL,
-		agentBotID:  event.AgentBotID,
+		outgoingURL: event.OutgoingURL,
 		apiKey:      event.ApiKey,
 	})
 
@@ -338,18 +340,18 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 	)
 	start := time.Now()
 
-	// Retrieve agent_bot_id and api_key from the pipeline entry.
+	// Retrieve outgoing_url and api_key from the pipeline entry.
 	key := pairKey(contactID, conversationID)
-	var agentBotID, apiKey string
+	var outgoingURL, apiKey string
 	if v, ok := s.entries.Load(key); ok {
 		if entry, ok := v.(pipelineEntry); ok {
-			agentBotID = entry.agentBotID
+			outgoingURL = entry.outgoingURL
 			apiKey = entry.apiKey
 		}
 	}
 
 	resp, err := s.aiAdapter.Call(ctx, &aiModel.A2ARequest{
-		AgentBotID:     agentBotID,
+		OutgoingURL:    outgoingURL,
 		ContactID:      contactID,
 		ConversationID: conversationID,
 		ApiKey:         apiKey,

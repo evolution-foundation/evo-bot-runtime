@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
@@ -26,16 +25,14 @@ type AIAdapter interface {
 }
 
 type aiAdapter struct {
-	baseURL     string
 	timeoutSecs int
 	client      *http.Client
 }
 
 // NewAIAdapter constructs the adapter. Returns interface (GEAR R03).
-// baseURL is the AI Processor base URL without path (e.g. http://ai-processor:8000).
-func NewAIAdapter(baseURL string, timeoutSecs int) AIAdapter {
+// The AI Processor URL comes from each event's outgoing_url field.
+func NewAIAdapter(timeoutSecs int) AIAdapter {
 	return &aiAdapter{
-		baseURL:     strings.TrimRight(baseURL, "/"),
 		timeoutSecs: timeoutSecs,
 		client:      &http.Client{},
 	}
@@ -48,8 +45,8 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(a.timeoutSecs)*time.Second)
 	defer cancel()
 
-	// Build per-event URL: {baseURL}/api/v1/a2a/{agent_bot_id}
-	url := fmt.Sprintf("%s/api/v1/a2a/%s", a.baseURL, req.AgentBotID)
+	// Use the full outgoing_url provided by the CRM (already contains the agent ID)
+	url := req.OutgoingURL
 
 	// Build JSON-RPC 2.0 envelope
 	rpcReq := model.JSONRPCRequest{
