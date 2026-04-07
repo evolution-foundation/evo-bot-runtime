@@ -166,6 +166,7 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		postbackURL: event.PostbackURL,
 		outgoingURL: event.OutgoingURL,
 		apiKey:      event.ApiKey,
+		metadata:    event.Metadata,
 	})
 
 	if err := s.debounce.Start(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.BotConfig); err != nil {
@@ -183,6 +184,7 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		PostbackURL: event.PostbackURL,
 		OutgoingURL: event.OutgoingURL,
 		ApiKey:      event.ApiKey,
+		Metadata:    event.Metadata,
 	}
 	if err := s.repo.SetState(ctx, event.ContactID, event.ConversationID, newState); err != nil {
 		cancel()
@@ -209,6 +211,7 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 		postbackURL: event.PostbackURL,
 		outgoingURL: event.OutgoingURL,
 		apiKey:      event.ApiKey,
+		metadata:    event.Metadata,
 	})
 
 	// debounce.Start appends to buffer; DebounceTime=0 means no timer (Story 2.1).
@@ -340,13 +343,15 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 	)
 	start := time.Now()
 
-	// Retrieve outgoing_url and api_key from the pipeline entry.
+	// Retrieve outgoing_url, api_key and metadata from the pipeline entry.
 	key := pairKey(contactID, conversationID)
 	var outgoingURL, apiKey string
+	var metadata map[string]any
 	if v, ok := s.entries.Load(key); ok {
 		if entry, ok := v.(pipelineEntry); ok {
 			outgoingURL = entry.outgoingURL
 			apiKey = entry.apiKey
+			metadata = entry.metadata
 		}
 	}
 
@@ -356,6 +361,7 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 		ConversationID: conversationID,
 		ApiKey:         apiKey,
 		Message:        buffer,
+		Metadata:       metadata,
 	})
 	if err != nil {
 		switch {

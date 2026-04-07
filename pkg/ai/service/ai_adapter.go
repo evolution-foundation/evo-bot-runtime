@@ -62,7 +62,7 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 					{Type: "text", Text: req.Message},
 				},
 			},
-			Metadata: map[string]any{},
+			Metadata: nonNilMetadata(req.Metadata),
 		},
 	}
 
@@ -140,4 +140,12 @@ func extractResponseText(resp *model.A2AResponse) string {
 		}
 	}
 	return ""
+}
+
+// nonNilMetadata ensures metadata is never nil (avoids "null" in JSON).
+func nonNilMetadata(m map[string]any) map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
 }
