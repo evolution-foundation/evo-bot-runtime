@@ -12,7 +12,7 @@ Harassment, discrimination, or abusive behavior will not be tolerated.
 
 ### Reporting Bugs
 
-1. Check existing [issues](https://github.com/EvolutionAPI/evo-bot-runtime/issues)
+1. Check existing [issues](https://github.com/evolution-foundation/evo-bot-runtime/issues)
    to avoid duplicates
 2. Open a new issue with:
    - Clear, descriptive title
