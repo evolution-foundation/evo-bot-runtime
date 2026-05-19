@@ -43,11 +43,11 @@ var _ aiIface.AIAdapter = (*mockAIAdapter)(nil)
 
 // mockDispatchEngine implements dispatchIface.DispatchEngine for testing.
 type mockDispatchEngine struct {
-	dispatchFn func(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig, postbackURL string) error
+	dispatchFn func(ctx context.Context, contactID, conversationID int64, resp *aiModel.NormalizedResponse, cfg model.BotConfig, postbackURL string) error
 }
 
-func (m *mockDispatchEngine) Dispatch(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig, postbackURL string) error {
-	return m.dispatchFn(ctx, contactID, conversationID, content, cfg, postbackURL)
+func (m *mockDispatchEngine) Dispatch(ctx context.Context, contactID, conversationID int64, resp *aiModel.NormalizedResponse, cfg model.BotConfig, postbackURL string) error {
+	return m.dispatchFn(ctx, contactID, conversationID, resp, cfg, postbackURL)
 }
 
 var _ dispatchIface.DispatchEngine = (*mockDispatchEngine)(nil) // compile-time check
@@ -134,7 +134,7 @@ func setupSvcWithAIAndDispatch(t *testing.T, ai aiIface.AIAdapter, dispatch disp
 // that existing tests checking for StageDispatch see it before dispatch completes.
 func setupSvcWithAI(t *testing.T, ai aiIface.AIAdapter) (*pipelineService, *redis.Client) {
 	blockingDispatch := &mockDispatchEngine{
-		dispatchFn: func(ctx context.Context, _, _ int64, _ string, _ model.BotConfig, _ string) error {
+		dispatchFn: func(ctx context.Context, _, _ int64, _ *aiModel.NormalizedResponse, _ model.BotConfig, _ string) error {
 			<-ctx.Done()
 			return brtErrors.ErrDispatchInterrupted
 		},
@@ -593,7 +593,7 @@ func TestPipeline_FullFlow_DispatchCompletes(t *testing.T) {
 		},
 	}
 	mockDispatch := &mockDispatchEngine{
-		dispatchFn: func(_ context.Context, _, _ int64, _ string, _ model.BotConfig, _ string) error {
+		dispatchFn: func(_ context.Context, _, _ int64, _ *aiModel.NormalizedResponse, _ model.BotConfig, _ string) error {
 			return nil
 		},
 	}
@@ -626,7 +626,7 @@ func TestPipeline_DispatchInterrupted_KeepsNewDebounce(t *testing.T) {
 	}
 	dispatchDone := make(chan struct{})
 	mockDispatch := &mockDispatchEngine{
-		dispatchFn: func(ctx context.Context, _, _ int64, _ string, _ model.BotConfig, _ string) error {
+		dispatchFn: func(ctx context.Context, _, _ int64, _ *aiModel.NormalizedResponse, _ model.BotConfig, _ string) error {
 			defer close(dispatchDone)
 			<-ctx.Done() // block until pipeline context is cancelled
 			return brtErrors.ErrDispatchInterrupted
@@ -679,7 +679,7 @@ func TestPipeline_DispatchError_ClearsState(t *testing.T) {
 	}
 	dispatchDone := make(chan struct{})
 	mockDispatch := &mockDispatchEngine{
-		dispatchFn: func(_ context.Context, _, _ int64, _ string, _ model.BotConfig, _ string) error {
+		dispatchFn: func(_ context.Context, _, _ int64, _ *aiModel.NormalizedResponse, _ model.BotConfig, _ string) error {
 			defer close(dispatchDone)
 			return fmt.Errorf("postback server unavailable")
 		},

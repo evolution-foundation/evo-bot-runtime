@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
+	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 )
 
@@ -24,7 +25,7 @@ type DispatchEngine interface {
 		ctx            context.Context,
 		contactID      int64,
 		conversationID int64,
-		content        string,
+		resp           *aiModel.NormalizedResponse,
 		cfg            model.BotConfig,
 		postbackURL    string,
 	) error
@@ -32,9 +33,11 @@ type DispatchEngine interface {
 
 // postbackRequest is the JSON body for each HTTP POST to the postback endpoint.
 type postbackRequest struct {
-	Content     string `json:"content"`
-	MessageType string `json:"message_type"`
-	ContentType string `json:"content_type"`
+	Content     string             `json:"content"`
+	MessageType string             `json:"message_type"`
+	ContentType string             `json:"content_type"`
+	Items       []aiModel.SelectItem `json:"items,omitempty"`
+	IsMultiple  bool               `json:"is_multiple,omitempty"`
 }
 
 type dispatchEngineImpl struct {
@@ -59,11 +62,17 @@ func (d *dispatchEngineImpl) Dispatch(
 	ctx            context.Context,
 	contactID      int64,
 	conversationID int64,
-	content        string,
+	resp           *aiModel.NormalizedResponse,
 	cfg            model.BotConfig,
 	postbackURL    string,
 ) error {
-	parts := segmentContent(content, cfg)
+	// Structured messages (input_select) must never be segmented — send as one part.
+	var parts []string
+	if resp.ContentType == "input_select" {
+		parts = []string{resp.Content}
+	} else {
+		parts = segmentContent(resp.Content, cfg)
+	}
 
 	// Prepend signature to the first part (FR-21)
 	if cfg.MessageSignature != "" && len(parts) > 0 {
@@ -85,7 +94,15 @@ func (d *dispatchEngineImpl) Dispatch(
 		default:
 		}
 
-		if err := d.sendPart(ctx, postbackURL, part); err != nil {
+		// Only the last (or only) part carries structured items to avoid duplication.
+		var items []aiModel.SelectItem
+		var isMultiple bool
+		if i == len(parts)-1 && resp.ContentType == "input_select" {
+			items = resp.Items
+			isMultiple = resp.IsMultiple
+		}
+
+		if err := d.sendPart(ctx, postbackURL, part, resp.ContentType, items, isMultiple); err != nil {
 			return fmt.Errorf("pipeline.dispatch.send[%d]: %w", i, err)
 		}
 
@@ -115,11 +132,20 @@ func (d *dispatchEngineImpl) Dispatch(
 }
 
 // sendPart sends a single content part to the postback URL.
-func (d *dispatchEngineImpl) sendPart(ctx context.Context, postbackURL, content string) error {
+func (d *dispatchEngineImpl) sendPart(
+	ctx         context.Context,
+	postbackURL string,
+	content     string,
+	contentType string,
+	items       []aiModel.SelectItem,
+	isMultiple  bool,
+) error {
 	body, err := json.Marshal(postbackRequest{
 		Content:     content,
 		MessageType: "outgoing",
-		ContentType: "text",
+		ContentType: contentType,
+		Items:       items,
+		IsMultiple:  isMultiple,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
