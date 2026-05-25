@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - N/A
 
+## [v1.0.0-rc3] - 2026-05-06
+
+Catch-up release publicada após o ciclo da família CRM Community para alinhar a tag e a imagem Docker com as demais (`v1.0.0-rc3`). Sem mudanças funcionais no serviço — o binário Go é idêntico ao da `v1.0.0-rc2`.
+
+### Changed
+
+- **Docs/branding**: README, CONTRIBUTING, LICENSE, NOTICE, SECURITY e TRADEMARKS padronizados sob a Evolution Foundation; URLs do GitHub migradas de `EvolutionAPI` para `evolution-foundation`.
+
 ## [v1.0.0-rc2] - 2026-05-05
 
 Release sem mudanças funcionais neste serviço — apenas ajustes de pipeline / staging.
@@ -36,6 +44,7 @@ Release sem mudanças funcionais neste serviço — apenas ajustes de pipeline /
 
 ---
 
-[Unreleased]: https://github.com/EvolutionAPI/evo-bot-runtime/compare/v1.0.0-rc2...HEAD
-[v1.0.0-rc2]: https://github.com/EvolutionAPI/evo-bot-runtime/compare/v1.0.0-rc1...v1.0.0-rc2
-[v1.0.0-rc1]: https://github.com/EvolutionAPI/evo-bot-runtime/releases/tag/v1.0.0-rc1
+[Unreleased]: https://github.com/evolution-foundation/evo-bot-runtime/compare/v1.0.0-rc3...HEAD
+[v1.0.0-rc3]: https://github.com/evolution-foundation/evo-bot-runtime/compare/v1.0.0-rc2...v1.0.0-rc3
+[v1.0.0-rc2]: https://github.com/evolution-foundation/evo-bot-runtime/compare/v1.0.0-rc1...v1.0.0-rc2
+[v1.0.0-rc1]: https://github.com/evolution-foundation/evo-bot-runtime/releases/tag/v1.0.0-rc1
