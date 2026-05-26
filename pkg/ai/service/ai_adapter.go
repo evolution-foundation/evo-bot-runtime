@@ -104,42 +104,58 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 		return nil, fmt.Errorf("pipeline.ai.decode: %w", err)
 	}
 
-	content := extractResponseText(&a2aResp)
+	nr := extractNormalized(&a2aResp)
 
 	slog.Info("pipeline.ai.http.completed",
-		"contact_id", req.ContactID,
+		"contact_id",  req.ContactID,
 		"conversation_id", req.ConversationID,
 		"duration_ms", time.Since(start).Milliseconds(),
+		"content_type", nr.ContentType,
+		"has_items",   len(nr.Items) > 0,
 	)
 
-	return &model.NormalizedResponse{Content: content}, nil
+	return nr, nil
 }
 
-// extractResponseText extracts the text content from the A2A JSON-RPC response.
-// Tries result.artifacts[0].parts[0].text first, then result.message.parts[0].text.
-func extractResponseText(resp *model.A2AResponse) string {
+// extractNormalized parses an A2A JSON-RPC response into a NormalizedResponse.
+// It scans all artifacts and parts, capturing:
+//   - the first non-empty "text" part as Content
+//   - the first "select" part (if present) as ContentType=="input_select" + Items
+// Falls back to result.message.parts when no artifact text is found.
+func extractNormalized(resp *model.A2AResponse) *model.NormalizedResponse {
+	nr := &model.NormalizedResponse{ContentType: "text"}
 	if resp.Result == nil {
-		return ""
+		return nr
 	}
-	// Try artifacts first (primary response format)
-	if len(resp.Result.Artifacts) > 0 {
-		for _, artifact := range resp.Result.Artifacts {
-			for _, part := range artifact.Parts {
-				if part.Text != "" {
-					return part.Text
+
+	// Scan all artifacts and all parts in each artifact.
+	for _, artifact := range resp.Result.Artifacts {
+		for _, part := range artifact.Parts {
+			switch part.Type {
+			case "text":
+				if nr.Content == "" && part.Text != "" {
+					nr.Content = part.Text
+				}
+			case "select":
+				if nr.ContentType == "text" && len(part.Items) > 0 {
+					nr.ContentType = "input_select"
+					nr.Items = part.Items
+					nr.IsMultiple = part.IsMultiple
 				}
 			}
 		}
 	}
-	// Fallback to message format
-	if resp.Result.Message != nil {
+
+	// Fallback to message format when no artifact text found.
+	if nr.Content == "" && resp.Result.Message != nil {
 		for _, part := range resp.Result.Message.Parts {
 			if part.Text != "" {
-				return part.Text
+				nr.Content = part.Text
+				break
 			}
 		}
 	}
-	return ""
+	return nr
 }
 
 // nonNilMetadata ensures metadata is never nil (avoids "null" in JSON).

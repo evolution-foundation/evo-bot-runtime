@@ -65,9 +65,9 @@ func TestCall_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(server.URL, 30)
+	adapter := aiService.NewAIAdapter(30)
 	resp, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		AgentBotID:     "agent-123",
+		OutgoingURL:    server.URL + "/api/v1/a2a/agent-123",
 		Message:        "hello world",
 		ContactID:      42,
 		ConversationID: 7,
@@ -95,11 +95,11 @@ func TestCall_Success_MessageFormat(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(server.URL, 30)
+	adapter := aiService.NewAIAdapter(30)
 	resp, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		AgentBotID: "bot-1",
-		Message:    "test",
-		ApiKey:     "key",
+		OutgoingURL: server.URL + "/api/v1/a2a/bot-1",
+		Message:     "test",
+		ApiKey:      "key",
 	})
 	if err != nil {
 		t.Fatalf("Call returned unexpected error: %v", err)
@@ -122,7 +122,7 @@ func TestCall_ContextCancellation_ReturnsPipelineCancelled(t *testing.T) {
 		server.Close()
 	})
 
-	adapter := aiService.NewAIAdapter(server.URL, 30)
+	adapter := aiService.NewAIAdapter(30)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -130,7 +130,7 @@ func TestCall_ContextCancellation_ReturnsPipelineCancelled(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := adapter.Call(ctx, &aiModel.A2ARequest{AgentBotID: "bot-1", Message: "test", ApiKey: "key"})
+	_, err := adapter.Call(ctx, &aiModel.A2ARequest{OutgoingURL: server.URL + "/api/v1/a2a/bot-1", Message: "test", ApiKey: "key"})
 	if !errors.Is(err, brtErrors.ErrPipelineCancelled) {
 		t.Errorf("expected ErrPipelineCancelled, got %v", err)
 	}
@@ -149,8 +149,8 @@ func TestCall_Timeout_ReturnsAITimeout(t *testing.T) {
 		server.Close()
 	})
 
-	adapter := aiService.NewAIAdapter(server.URL, 1) // 1 s timeout
-	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{AgentBotID: "bot-1", Message: "test", ApiKey: "key"})
+	adapter := aiService.NewAIAdapter(1) // 1 s timeout
+	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{OutgoingURL: server.URL + "/api/v1/a2a/bot-1", Message: "test", ApiKey: "key"})
 	if !errors.Is(err, brtErrors.ErrAITimeout) {
 		t.Errorf("expected ErrAITimeout, got %v", err)
 	}
@@ -162,8 +162,8 @@ func TestCall_NonOKStatus_ReturnsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(server.URL, 30)
-	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{AgentBotID: "bot-1", Message: "test", ApiKey: "key"})
+	adapter := aiService.NewAIAdapter(30)
+	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{OutgoingURL: server.URL + "/api/v1/a2a/bot-1", Message: "test", ApiKey: "key"})
 	if err == nil {
 		t.Fatal("expected error for non-200 response, got nil")
 	}

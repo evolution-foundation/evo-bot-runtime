@@ -219,8 +219,8 @@ func newHarness(t *testing.T) *harness {
 	rs := redsync.New(pool)
 	repo := repository.NewPipelineRepository(rdb, rs)
 	debounce := debounceService.NewDebounceEngine(repo)
-	ai := aiService.NewAIAdapter(aiSrv.URL, 10)
-	dispatch := dispatchService.NewDispatchEngine()
+	ai := aiService.NewAIAdapter(10)
+	dispatch := dispatchService.NewDispatchEngine("")
 	pipeline := pipelineService.NewPipelineService(repo, debounce, ai, dispatch)
 	if err := pipeline.Start(); err != nil {
 		t.Fatalf("pipeline.Start: %v", err)
@@ -709,8 +709,8 @@ func TestE2E_RecoveryAfterRestart(t *testing.T) {
 	rs := redsync.New(pool)
 	repo := repository.NewPipelineRepository(rdb, rs)
 	debounce := debounceService.NewDebounceEngine(repo)
-	ai := aiService.NewAIAdapter(aiSrv.URL, 10)
-	dispatch := dispatchService.NewDispatchEngine()
+	ai := aiService.NewAIAdapter(10)
+	dispatch := dispatchService.NewDispatchEngine("")
 
 	aiSrv.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
