@@ -7,44 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [v1.0.0-rc5] - 2026-05-27
 
-- N/A
-
-### Changed
-
-- N/A
-
-### Fixed
-
-- N/A
+Catch-up release. The `evo-bot-runtime` service skipped `v1.0.0-rc4` (no functional changes warranted a tag at that time); this `v1.0.0-rc5` tag realigns the bot-runtime image with the rest of the CRM Community family. No code or behavior changes — the Go binary is identical to `v1.0.0-rc3`.
 
 ## [v1.0.0-rc3] - 2026-05-06
 
-Catch-up release publicada após o ciclo da família CRM Community para alinhar a tag e a imagem Docker com as demais (`v1.0.0-rc3`). Sem mudanças funcionais no serviço — o binário Go é idêntico ao da `v1.0.0-rc2`.
+Catch-up release published after the CRM Community family cycle to align the tag and Docker image with the rest of the family (`v1.0.0-rc3`). No functional changes in the service — the Go binary is identical to `v1.0.0-rc2`.
 
 ### Changed
 
-- **Docs/branding**: README, CONTRIBUTING, LICENSE, NOTICE, SECURITY e TRADEMARKS padronizados sob a Evolution Foundation; URLs do GitHub migradas de `EvolutionAPI` para `evolution-foundation`.
+- **Docs/branding**: README, CONTRIBUTING, LICENSE, NOTICE, SECURITY and TRADEMARKS standardized under Evolution Foundation; GitHub URLs migrated from `EvolutionAPI` to `evolution-foundation`.
 
 ## [v1.0.0-rc2] - 2026-05-05
 
-Release sem mudanças funcionais neste serviço — apenas ajustes de pipeline / staging.
+Release with no functional changes in this service — only pipeline / staging adjustments.
 
 ### Changed
 
-- **CI**: workflow agora também publica imagens `develop` para staging. (#1)
+- **CI**: workflow now also publishes `develop` images to staging. (#1)
 
 ## [v1.0.0-rc1] - 2026-04-24
 
 ### Added
 
-- Primeiro release candidate público do `evo-bot-runtime`.
-- Serviço Go de orquestração de chatbot (Bot Runtime).
+- First public release candidate of `evo-bot-runtime`.
+- Go chatbot orchestration service (Bot Runtime).
 
 ---
 
-[Unreleased]: https://github.com/evolution-foundation/evo-bot-runtime/compare/v1.0.0-rc3...HEAD
+[Unreleased]: https://github.com/evolution-foundation/evo-bot-runtime/compare/v1.0.0-rc5...HEAD
+[v1.0.0-rc5]: https://github.com/evolution-foundation/evo-bot-runtime/compare/v1.0.0-rc3...v1.0.0-rc5
 [v1.0.0-rc3]: https://github.com/evolution-foundation/evo-bot-runtime/compare/v1.0.0-rc2...v1.0.0-rc3
 [v1.0.0-rc2]: https://github.com/evolution-foundation/evo-bot-runtime/compare/v1.0.0-rc1...v1.0.0-rc2
 [v1.0.0-rc1]: https://github.com/evolution-foundation/evo-bot-runtime/releases/tag/v1.0.0-rc1
