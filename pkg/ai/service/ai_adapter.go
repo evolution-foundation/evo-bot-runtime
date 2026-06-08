@@ -57,13 +57,22 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 	// to the numeric ID only when the metadata is absent (e.g. legacy callers).
 	contextID := conversationContextID(req.Metadata, req.ConversationID)
 
+	// userId MUST be the contact UUID, not the numeric ContactID. The Processor's
+	// ADK session is keyed on (app_name, user_id, session_id). The CRM's SessionSync
+	// pre-creates/persists that session with the contact UUID as user_id, so when the
+	// a2a run looks it up with the numeric ContactID the keys diverge and the runner
+	// raises "Session not found" → 500 → the agent never replies (even though the
+	// session and its history exist). Prefer the contact UUID from the CRM metadata;
+	// fall back to the numeric ID only when the metadata is absent (legacy callers).
+	userID := contactUserID(req.Metadata, req.ContactID)
+
 	rpcReq := model.JSONRPCRequest{
 		JSONRPC: "2.0",
 		ID:      fmt.Sprintf("%d:%d", req.ContactID, req.ConversationID),
 		Method:  "message/send",
 		Params: model.JSONRPCParams{
 			ContextID: contextID,
-			UserID:    fmt.Sprintf("%d", req.ContactID),
+			UserID:    userID,
 			Message: model.JSONRPCMessage{
 				Role: "user",
 				Parts: []model.JSONRPCPart{
@@ -182,6 +191,35 @@ func extractConversationUUID(metadata map[string]any) string {
 		return ""
 	}
 	id, ok := conversation["id"].(string)
+	if !ok {
+		return ""
+	}
+	return id
+}
+
+// contactUserID resolves the userId for the JSON-RPC call. It reads the contact
+// UUID the CRM nests at metadata.evoai_crm_data.contact.id (the same value the CRM's
+// SessionSync uses as the ADK session user_id) and returns it; if any hop is missing
+// or empty it falls back to the numeric contact ID (legacy behaviour).
+func contactUserID(metadata map[string]any, contactID int64) string {
+	if uuid := extractContactUUID(metadata); uuid != "" {
+		return uuid
+	}
+	return fmt.Sprintf("%d", contactID)
+}
+
+// extractContactUUID digs metadata.evoai_crm_data.contact.id out of the untyped CRM
+// metadata map. Returns "" when the path is absent or not a string.
+func extractContactUUID(metadata map[string]any) string {
+	crmData, ok := metadata["evoai_crm_data"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	contact, ok := crmData["contact"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	id, ok := contact["id"].(string)
 	if !ok {
 		return ""
 	}

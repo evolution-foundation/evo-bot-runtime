@@ -16,13 +16,18 @@ import (
 )
 
 // crmMetadata builds the nested CRM metadata map the Rails AgentBotListener sends,
-// carrying the conversation UUID at evoai_crm_data.conversation.id.
-func crmMetadata(conversationUUID string) map[string]any {
+// carrying the conversation UUID at evoai_crm_data.conversation.id and the contact
+// UUID at evoai_crm_data.contact.id.
+func crmMetadata(conversationUUID, contactUUID string) map[string]any {
 	return map[string]any{
 		"evoai_crm_data": map[string]any{
 			"conversation": map[string]any{
 				"id":         conversationUUID,
 				"display_id": 7,
+			},
+			"contact": map[string]any{
+				"id":   contactUUID,
+				"name": "Davidson Gomes",
 			},
 		},
 	}
@@ -58,8 +63,9 @@ func TestCall_Success(t *testing.T) {
 		if req.Params.ContextID != "conv-uuid-abc" {
 			t.Errorf("req.Params.ContextID = %q, want %q", req.Params.ContextID, "conv-uuid-abc")
 		}
-		if req.Params.UserID != "42" {
-			t.Errorf("req.Params.UserID = %q, want %q", req.Params.UserID, "42")
+		// userId must be the contact UUID from metadata, not the numeric ContactID.
+		if req.Params.UserID != "contact-uuid-xyz" {
+			t.Errorf("req.Params.UserID = %q, want %q", req.Params.UserID, "contact-uuid-xyz")
 		}
 		if len(req.Params.Message.Parts) != 1 || req.Params.Message.Parts[0].Text != "hello world" {
 			t.Errorf("message parts = %+v, want single part with text 'hello world'", req.Params.Message.Parts)
@@ -86,7 +92,7 @@ func TestCall_Success(t *testing.T) {
 		ContactID:      42,
 		ConversationID: 7,
 		ApiKey:         "test-key",
-		Metadata:       crmMetadata("conv-uuid-abc"),
+		Metadata:       crmMetadata("conv-uuid-abc", "contact-uuid-xyz"),
 	})
 	if err != nil {
 		t.Fatalf("Call returned unexpected error: %v", err)
@@ -108,6 +114,10 @@ func TestCall_ContextID_FallsBackToNumericID(t *testing.T) {
 		if req.Params.ContextID != "7" {
 			t.Errorf("req.Params.ContextID = %q, want fallback %q", req.Params.ContextID, "7")
 		}
+		// Without metadata, userId falls back to the numeric ContactID.
+		if req.Params.UserID != "42" {
+			t.Errorf("req.Params.UserID = %q, want fallback %q", req.Params.UserID, "42")
+		}
 		json.NewEncoder(w).Encode(aiModel.A2AResponse{
 			Result: &aiModel.A2AResult{
 				Artifacts: []aiModel.A2AArtifact{
@@ -122,9 +132,10 @@ func TestCall_ContextID_FallsBackToNumericID(t *testing.T) {
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL:    server.URL,
 		Message:        "test",
+		ContactID:      42,
 		ConversationID: 7,
 		ApiKey:         "key",
-		// No Metadata → must fall back to the numeric ConversationID.
+		// No Metadata → must fall back to the numeric ConversationID/ContactID.
 	})
 	if err != nil {
 		t.Fatalf("Call returned unexpected error: %v", err)
