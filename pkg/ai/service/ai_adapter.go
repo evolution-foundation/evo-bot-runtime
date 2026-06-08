@@ -48,13 +48,21 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 	// Use the full outgoing_url provided by the CRM (already contains the agent ID)
 	url := req.OutgoingURL
 
-	// Build JSON-RPC 2.0 envelope
+	// Build JSON-RPC 2.0 envelope.
+	// contextId MUST be the conversation UUID, not the numeric display_id: the AI
+	// Processor builds the ADK session key as "{contextId}_{agentID}". Using the
+	// display_id ("3") collides across accounts and never matches the session the
+	// Processor persisted (which keys on the UUID), so every turn reads 0 history
+	// and the agent loses memory. Prefer the UUID from the CRM metadata; fall back
+	// to the numeric ID only when the metadata is absent (e.g. legacy callers).
+	contextID := conversationContextID(req.Metadata, req.ConversationID)
+
 	rpcReq := model.JSONRPCRequest{
 		JSONRPC: "2.0",
 		ID:      fmt.Sprintf("%d:%d", req.ContactID, req.ConversationID),
 		Method:  "message/send",
 		Params: model.JSONRPCParams{
-			ContextID: fmt.Sprintf("%d", req.ConversationID),
+			ContextID: contextID,
 			UserID:    fmt.Sprintf("%d", req.ContactID),
 			Message: model.JSONRPCMessage{
 				Role: "user",
@@ -148,4 +156,34 @@ func nonNilMetadata(m map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	return m
+}
+
+// conversationContextID resolves the contextId for the JSON-RPC call. It reads the
+// conversation UUID the CRM nests at metadata.evoai_crm_data.conversation.id and
+// returns it; if any hop is missing or empty it falls back to the numeric
+// conversation ID (legacy behaviour) so callers without metadata still work.
+func conversationContextID(metadata map[string]any, conversationID int64) string {
+	fallback := fmt.Sprintf("%d", conversationID)
+	if uuid := extractConversationUUID(metadata); uuid != "" {
+		return uuid
+	}
+	return fallback
+}
+
+// extractConversationUUID digs metadata.evoai_crm_data.conversation.id out of the
+// untyped CRM metadata map. Returns "" when the path is absent or not a string.
+func extractConversationUUID(metadata map[string]any) string {
+	crmData, ok := metadata["evoai_crm_data"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	conversation, ok := crmData["conversation"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	id, ok := conversation["id"].(string)
+	if !ok {
+		return ""
+	}
+	return id
 }
