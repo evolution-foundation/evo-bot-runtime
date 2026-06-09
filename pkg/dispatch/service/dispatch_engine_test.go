@@ -42,7 +42,7 @@ func collectParts(t *testing.T) (*httptest.Server, *[]string, *sync.Mutex) {
 func TestDispatch_MultiPart_SignatureOnFirstOnly(t *testing.T) {
 	server, partsPtr, mu := collectParts(t)
 
-	eng := service.NewDispatchEngine()
+	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{
 		TextSegmentationEnabled: true,
 		TextSegmentationLimit:   15, // forces multiple parts
@@ -79,7 +79,7 @@ func TestDispatch_MultiPart_SignatureOnFirstOnly(t *testing.T) {
 func TestDispatch_NoSegmentation_SinglePart(t *testing.T) {
 	server, partsPtr, mu := collectParts(t)
 
-	eng := service.NewDispatchEngine()
+	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{
 		TextSegmentationEnabled: false,
 		MessageSignature:        "—signature ",
@@ -118,7 +118,7 @@ func TestDispatch_Cancellation_ReturnsInterrupted(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	eng := service.NewDispatchEngine()
+	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{
 		TextSegmentationEnabled: true,
 		TextSegmentationLimit:   5,  // small limit → many parts
@@ -149,7 +149,7 @@ func TestDispatch_Cancellation_ReturnsInterrupted(t *testing.T) {
 func TestDispatch_EmptySignature_NoSuffix(t *testing.T) {
 	server, partsPtr, mu := collectParts(t)
 
-	eng := service.NewDispatchEngine()
+	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{
 		TextSegmentationEnabled: false,
 		MessageSignature:        "", // empty — no suffix
@@ -178,7 +178,7 @@ func TestDispatch_NonOKResponse_ReturnsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	eng := service.NewDispatchEngine()
+	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{TextSegmentationEnabled: false}
 
 	err := eng.Dispatch(context.Background(), 8, 8, "some content", cfg, server.URL)
@@ -192,7 +192,7 @@ func TestSegmentContent_MergeDoesNotExceedLimit(t *testing.T) {
 	// would produce "hello world test"(16 runes) > limit=11 → must NOT merge.
 	server, partsPtr, mu := collectParts(t)
 
-	eng := service.NewDispatchEngine()
+	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{
 		TextSegmentationEnabled: true,
 		TextSegmentationLimit:   11,
@@ -226,7 +226,7 @@ func TestSegmentContent_RuneAwareLimits(t *testing.T) {
 	// A byte-counting bug would compute 10 bytes > 9 and wrongly split into 2 parts.
 	server, partsPtr, mu := collectParts(t)
 
-	eng := service.NewDispatchEngine()
+	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{
 		TextSegmentationEnabled: true,
 		TextSegmentationLimit:   9, // rune limit — "olá mundo" is exactly 9 runes
@@ -262,7 +262,7 @@ func TestDispatch_ValidatesPostBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	eng := service.NewDispatchEngine()
+	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{TextSegmentationEnabled: false}
 
 	if err := eng.Dispatch(context.Background(), 5, 5, "test content", cfg, server.URL); err != nil {

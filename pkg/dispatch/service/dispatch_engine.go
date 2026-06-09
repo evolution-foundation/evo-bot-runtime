@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -32,9 +33,18 @@ type DispatchEngine interface {
 
 // postbackRequest is the JSON body for each HTTP POST to the postback endpoint.
 type postbackRequest struct {
-	Content     string `json:"content"`
-	MessageType string `json:"message_type"`
-	ContentType string `json:"content_type"`
+	Content     string               `json:"content"`
+	MessageType string               `json:"message_type"`
+	ContentType string               `json:"content_type"`
+	Attachments []postbackAttachment `json:"attachments,omitempty"`
+}
+
+// postbackAttachment is a media URL detected in the AI response, sent to the CRM
+// so it can download and render it as real media instead of a plain text link.
+// FileType matches the CRM Attachment enum: image / audio / video / file.
+type postbackAttachment struct {
+	URL      string `json:"url"`
+	FileType string `json:"file_type"`
 }
 
 type dispatchEngineImpl struct {
@@ -63,7 +73,13 @@ func (d *dispatchEngineImpl) Dispatch(
 	cfg            model.BotConfig,
 	postbackURL    string,
 ) error {
-	parts := segmentContent(content, cfg)
+	// Pull media URLs out of the full response BEFORE segmenting, so media is
+	// not split across text parts. Media is delivered in a single dedicated
+	// postback after the text parts (see below). The CRM also re-detects media
+	// from the text as a fallback, so this is an optimization, not the only path.
+	residual, atts := extractMediaURLs(content)
+
+	parts := segmentContent(residual, cfg)
 
 	// Prepend signature to the first part (FR-21)
 	if cfg.MessageSignature != "" && len(parts) > 0 {
@@ -73,6 +89,12 @@ func (d *dispatchEngineImpl) Dispatch(
 	start := time.Now()
 
 	for i, part := range parts {
+		// Skip empty residual (e.g. response was only a media URL): the media
+		// postback below still runs.
+		if part == "" {
+			continue
+		}
+
 		// Check cancellation BEFORE sending this part
 		select {
 		case <-ctx.Done():
@@ -85,7 +107,7 @@ func (d *dispatchEngineImpl) Dispatch(
 		default:
 		}
 
-		if err := d.sendPart(ctx, postbackURL, part); err != nil {
+		if err := d.sendPart(ctx, postbackURL, part, nil); err != nil {
 			return fmt.Errorf("pipeline.dispatch.send[%d]: %w", i, err)
 		}
 
@@ -105,21 +127,36 @@ func (d *dispatchEngineImpl) Dispatch(
 		}
 	}
 
+	// Deliver media (if any) in a single dedicated postback after the text.
+	if len(atts) > 0 {
+		select {
+		case <-ctx.Done():
+			return brtErrors.ErrDispatchInterrupted
+		default:
+		}
+		if err := d.sendPart(ctx, postbackURL, "", atts); err != nil {
+			return fmt.Errorf("pipeline.dispatch.send[media]: %w", err)
+		}
+	}
+
 	slog.Info("pipeline.dispatch.completed",
 		"contact_id",      contactID,
 		"conversation_id", conversationID,
 		"duration_ms",     time.Since(start).Milliseconds(),
 		"parts_total",     len(parts),
+		"attachments",     len(atts),
 	)
 	return nil
 }
 
-// sendPart sends a single content part to the postback URL.
-func (d *dispatchEngineImpl) sendPart(ctx context.Context, postbackURL, content string) error {
+// sendPart sends a single content part (and optional media attachments) to the
+// postback URL.
+func (d *dispatchEngineImpl) sendPart(ctx context.Context, postbackURL, content string, atts []postbackAttachment) error {
 	body, err := json.Marshal(postbackRequest{
 		Content:     content,
 		MessageType: "outgoing",
 		ContentType: "text",
+		Attachments: atts,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -204,4 +241,70 @@ func segmentContent(content string, cfg model.BotConfig) []string {
 		}
 	}
 	return merged
+}
+
+// --- Media URL detection ---------------------------------------------------
+//
+// extractMediaURLs pulls media URLs (by file extension) out of the response
+// text and returns the residual text plus the detected attachments.
+//
+// DRIFT WARNING: this MUST stay in sync with the Ruby
+// AgentBots::MediaTypeDetector (app/services/agent_bots/media_type_detector.rb)
+// in evo-ai-crm-community. The CRM re-detects media from text as a fallback, so
+// a divergence degrades gracefully rather than losing media.
+
+var urlRegex = regexp.MustCompile(`https?://[^\s<>"']+`)
+
+// extension -> file_type (matches Attachment enum; document maps to "file").
+var mediaExtToFileType = func() map[string]string {
+	m := map[string]string{}
+	for _, e := range []string{"jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "tiff"} {
+		m[e] = "image"
+	}
+	for _, e := range []string{"mp3", "wav", "ogg", "m4a", "aac", "flac"} {
+		m[e] = "audio"
+	}
+	for _, e := range []string{"mp4", "avi", "mov", "wmv", "flv", "mkv", "webm"} {
+		m[e] = "video"
+	}
+	for _, e := range []string{"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "odt"} {
+		m[e] = "file"
+	}
+	return m
+}()
+
+// trailing punctuation often captured when a URL ends a sentence.
+const trailingPunct = ")].,!?;:"
+
+func extractMediaURLs(content string) (residual string, atts []postbackAttachment) {
+	residual = content
+	for _, rawURL := range urlRegex.FindAllString(content, -1) {
+		url := strings.TrimRight(rawURL, trailingPunct)
+		fileType := mediaFileType(url)
+		if fileType == "" {
+			continue // non-media URL stays in the text
+		}
+		atts = append(atts, postbackAttachment{URL: url, FileType: fileType})
+		residual = strings.Replace(residual, rawURL, "", 1)
+	}
+	return strings.TrimSpace(residual), atts
+}
+
+// mediaFileType returns the Attachment file_type for a URL, or "" if not media.
+// Matches the extension in the PATH, ignoring query string / fragment.
+func mediaFileType(url string) string {
+	path := url
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	seg := path
+	if i := strings.LastIndex(seg, "/"); i >= 0 {
+		seg = seg[i+1:]
+	}
+	dot := strings.LastIndex(seg, ".")
+	if dot < 0 {
+		return ""
+	}
+	ext := strings.ToLower(seg[dot+1:])
+	return mediaExtToFileType[ext]
 }
