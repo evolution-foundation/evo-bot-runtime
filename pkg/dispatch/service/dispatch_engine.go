@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
+	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 )
 
@@ -25,7 +26,7 @@ type DispatchEngine interface {
 		ctx            context.Context,
 		contactID      int64,
 		conversationID int64,
-		content        string,
+		resp           *aiModel.NormalizedResponse,
 		cfg            model.BotConfig,
 		postbackURL    string,
 	) error
@@ -36,6 +37,7 @@ type postbackRequest struct {
 	Content     string               `json:"content"`
 	MessageType string               `json:"message_type"`
 	ContentType string               `json:"content_type"`
+	Items       []aiModel.SelectItem `json:"items,omitempty"`
 	Attachments []postbackAttachment `json:"attachments,omitempty"`
 }
 
@@ -69,17 +71,25 @@ func (d *dispatchEngineImpl) Dispatch(
 	ctx            context.Context,
 	contactID      int64,
 	conversationID int64,
-	content        string,
+	resp           *aiModel.NormalizedResponse,
 	cfg            model.BotConfig,
 	postbackURL    string,
 ) error {
-	// Pull media URLs out of the full response BEFORE segmenting, so media is
-	// not split across text parts. Media is delivered in a single dedicated
-	// postback after the text parts (see below). The CRM also re-detects media
-	// from the text as a fallback, so this is an optimization, not the only path.
-	residual, atts := extractMediaURLs(content)
-
-	parts := segmentContent(residual, cfg)
+	// Structured messages (input_select) must never be segmented — send as one part.
+	// Media extraction only applies to text responses.
+	var parts []string
+	var atts []postbackAttachment
+	if resp.ContentType == "input_select" {
+		parts = []string{resp.Content}
+	} else {
+		// Pull media URLs out of the full response BEFORE segmenting, so media is
+		// not split across text parts. Media is delivered in a single dedicated
+		// postback after the text parts (see below). The CRM also re-detects media
+		// from the text as a fallback, so this is an optimization, not the only path.
+		residual, extracted := extractMediaURLs(resp.Content)
+		atts = extracted
+		parts = segmentContent(residual, cfg)
+	}
 
 	// Prepend signature to the first part (FR-21)
 	if cfg.MessageSignature != "" && len(parts) > 0 {
@@ -90,8 +100,10 @@ func (d *dispatchEngineImpl) Dispatch(
 
 	for i, part := range parts {
 		// Skip empty residual (e.g. response was only a media URL): the media
-		// postback below still runs.
-		if part == "" {
+		// postback below still runs. input_select is exempt — its items must
+		// always be delivered even when the AI processor sends no accompanying
+		// text (e.g. a choice block with no question text).
+		if part == "" && resp.ContentType != "input_select" {
 			continue
 		}
 
@@ -107,7 +119,13 @@ func (d *dispatchEngineImpl) Dispatch(
 		default:
 		}
 
-		if err := d.sendPart(ctx, postbackURL, part, nil); err != nil {
+		// Only the last (or only) part carries structured items to avoid duplication.
+		var items []aiModel.SelectItem
+		if i == len(parts)-1 && resp.ContentType == "input_select" {
+			items = resp.Items
+		}
+
+		if err := d.sendPart(ctx, postbackURL, part, resp.ContentType, nil, items); err != nil {
 			return fmt.Errorf("pipeline.dispatch.send[%d]: %w", i, err)
 		}
 
@@ -134,7 +152,7 @@ func (d *dispatchEngineImpl) Dispatch(
 			return brtErrors.ErrDispatchInterrupted
 		default:
 		}
-		if err := d.sendPart(ctx, postbackURL, "", atts); err != nil {
+		if err := d.sendPart(ctx, postbackURL, "", "", atts, nil); err != nil {
 			return fmt.Errorf("pipeline.dispatch.send[media]: %w", err)
 		}
 	}
@@ -149,13 +167,24 @@ func (d *dispatchEngineImpl) Dispatch(
 	return nil
 }
 
-// sendPart sends a single content part (and optional media attachments) to the
-// postback URL.
-func (d *dispatchEngineImpl) sendPart(ctx context.Context, postbackURL, content string, atts []postbackAttachment) error {
+// sendPart sends a single content part (and optional media attachments or
+// structured items) to the postback URL.
+func (d *dispatchEngineImpl) sendPart(
+	ctx         context.Context,
+	postbackURL string,
+	content     string,
+	contentType string,
+	atts        []postbackAttachment,
+	items       []aiModel.SelectItem,
+) error {
+	if contentType == "" {
+		contentType = "text"
+	}
 	body, err := json.Marshal(postbackRequest{
 		Content:     content,
 		MessageType: "outgoing",
-		ContentType: "text",
+		ContentType: contentType,
+		Items:       items,
 		Attachments: atts,
 	})
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
+	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/dispatch/service"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 )
@@ -52,7 +53,8 @@ func TestDispatch_MultiPart_SignatureOnFirstOnly(t *testing.T) {
 	}
 
 	// "hello world this is test" → segments of ≤15 chars
-	if err := eng.Dispatch(context.Background(), 1, 1, "hello world this is test", cfg, server.URL); err != nil {
+	resp1 := &aiModel.NormalizedResponse{Content: "hello world this is test", ContentType: "text"}
+	if err := eng.Dispatch(context.Background(), 1, 1, resp1, cfg, server.URL); err != nil {
 		t.Fatalf("Dispatch returned unexpected error: %v", err)
 	}
 
@@ -86,7 +88,8 @@ func TestDispatch_NoSegmentation_SinglePart(t *testing.T) {
 		DelayPerCharacter:       0,
 	}
 
-	if err := eng.Dispatch(context.Background(), 2, 2, "full response here", cfg, server.URL); err != nil {
+	resp2 := &aiModel.NormalizedResponse{Content: "full response here", ContentType: "text"}
+	if err := eng.Dispatch(context.Background(), 2, 2, resp2, cfg, server.URL); err != nil {
 		t.Fatalf("Dispatch returned unexpected error: %v", err)
 	}
 
@@ -130,7 +133,8 @@ func TestDispatch_Cancellation_ReturnsInterrupted(t *testing.T) {
 		cancel()
 	}()
 
-	err := eng.Dispatch(ctx, 3, 3, "alpha beta gamma delta epsilon", cfg, server.URL)
+	resp3 := &aiModel.NormalizedResponse{Content: "alpha beta gamma delta epsilon", ContentType: "text"}
+	err := eng.Dispatch(ctx, 3, 3, resp3, cfg, server.URL)
 	if !errors.Is(err, brtErrors.ErrDispatchInterrupted) {
 		t.Errorf("expected ErrDispatchInterrupted, got %v", err)
 	}
@@ -155,7 +159,8 @@ func TestDispatch_EmptySignature_NoSuffix(t *testing.T) {
 		MessageSignature:        "", // empty — no suffix
 	}
 
-	if err := eng.Dispatch(context.Background(), 4, 4, "no signature here", cfg, server.URL); err != nil {
+	resp4 := &aiModel.NormalizedResponse{Content: "no signature here", ContentType: "text"}
+	if err := eng.Dispatch(context.Background(), 4, 4, resp4, cfg, server.URL); err != nil {
 		t.Fatalf("Dispatch returned unexpected error: %v", err)
 	}
 
@@ -181,7 +186,8 @@ func TestDispatch_NonOKResponse_ReturnsError(t *testing.T) {
 	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{TextSegmentationEnabled: false}
 
-	err := eng.Dispatch(context.Background(), 8, 8, "some content", cfg, server.URL)
+	resp8 := &aiModel.NormalizedResponse{Content: "some content", ContentType: "text"}
+	err := eng.Dispatch(context.Background(), 8, 8, resp8, cfg, server.URL)
 	if err == nil {
 		t.Fatal("expected error for non-2xx response, got nil")
 	}
@@ -200,7 +206,8 @@ func TestSegmentContent_MergeDoesNotExceedLimit(t *testing.T) {
 		DelayPerCharacter:       0,
 	}
 
-	if err := eng.Dispatch(context.Background(), 6, 6, "hello world test", cfg, server.URL); err != nil {
+	resp6 := &aiModel.NormalizedResponse{Content: "hello world test", ContentType: "text"}
+	if err := eng.Dispatch(context.Background(), 6, 6, resp6, cfg, server.URL); err != nil {
 		t.Fatalf("Dispatch returned unexpected error: %v", err)
 	}
 
@@ -234,7 +241,8 @@ func TestSegmentContent_RuneAwareLimits(t *testing.T) {
 		DelayPerCharacter:       0,
 	}
 
-	if err := eng.Dispatch(context.Background(), 7, 7, "olá mundo", cfg, server.URL); err != nil {
+	resp7 := &aiModel.NormalizedResponse{Content: "olá mundo", ContentType: "text"}
+	if err := eng.Dispatch(context.Background(), 7, 7, resp7, cfg, server.URL); err != nil {
 		t.Fatalf("Dispatch returned unexpected error: %v", err)
 	}
 
@@ -248,6 +256,189 @@ func TestSegmentContent_RuneAwareLimits(t *testing.T) {
 	}
 	if parts[0] != "olá mundo" {
 		t.Errorf("parts[0] = %q, want %q", parts[0], "olá mundo")
+	}
+}
+
+// postbackBodyWithItems captures items and attachments for select/media tests.
+type postbackBodyWithItems struct {
+	Content     string               `json:"content"`
+	MessageType string               `json:"message_type"`
+	ContentType string               `json:"content_type"`
+	Items       []aiModel.SelectItem `json:"items,omitempty"`
+	Attachments []postbackAttachment `json:"attachments,omitempty"`
+}
+
+type postbackAttachment struct {
+	URL      string `json:"url"`
+	FileType string `json:"file_type"`
+}
+
+func TestDispatch_InputSelect_NoSegmentation(t *testing.T) {
+	var bodies []postbackBodyWithItems
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b postbackBodyWithItems
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	eng := service.NewDispatchEngine("")
+	cfg := model.BotConfig{
+		TextSegmentationEnabled: true,
+		TextSegmentationLimit:   5, // would normally split "choose an option" into multiple parts
+		DelayPerCharacter:       0,
+	}
+
+	items := []aiModel.SelectItem{
+		{Title: "Yes", Value: "yes"},
+		{Title: "No", Value: "no"},
+	}
+	resp := &aiModel.NormalizedResponse{
+		Content:     "choose an option",
+		ContentType: "input_select",
+		Items:       items,
+	}
+	if err := eng.Dispatch(context.Background(), 10, 10, resp, cfg, server.URL); err != nil {
+		t.Fatalf("Dispatch returned unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(bodies) != 1 {
+		t.Fatalf("input_select must not be segmented: expected 1 postback, got %d", len(bodies))
+	}
+	if bodies[0].ContentType != "input_select" {
+		t.Errorf("ContentType = %q, want %q", bodies[0].ContentType, "input_select")
+	}
+	if bodies[0].Content != "choose an option" {
+		t.Errorf("Content = %q, want %q", bodies[0].Content, "choose an option")
+	}
+	if len(bodies[0].Items) != 2 {
+		t.Fatalf("Items length = %d, want 2", len(bodies[0].Items))
+	}
+	if bodies[0].Items[0].Title != "Yes" || bodies[0].Items[0].Value != "yes" {
+		t.Errorf("Items[0] = %+v, want {Yes yes}", bodies[0].Items[0])
+	}
+	if bodies[0].Items[1].Title != "No" || bodies[0].Items[1].Value != "no" {
+		t.Errorf("Items[1] = %+v, want {No no}", bodies[0].Items[1])
+	}
+}
+
+// TestDispatch_InputSelect_EmptyContent_StillSendsItems is a regression test:
+// when the AI processor sends a select block with no accompanying question
+// text (Content == ""), the items must still reach the postback endpoint.
+// A prior version of the "skip empty residual" guard (meant for the
+// text/media path) also swallowed empty input_select parts, silently
+// dropping the items.
+func TestDispatch_InputSelect_EmptyContent_StillSendsItems(t *testing.T) {
+	var bodies []postbackBodyWithItems
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b postbackBodyWithItems
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	eng := service.NewDispatchEngine("")
+	cfg := model.BotConfig{TextSegmentationEnabled: false}
+
+	items := []aiModel.SelectItem{
+		{Title: "Yes", Value: "yes"},
+		{Title: "No", Value: "no"},
+	}
+	resp := &aiModel.NormalizedResponse{
+		Content:     "",
+		ContentType: "input_select",
+		Items:       items,
+	}
+	if err := eng.Dispatch(context.Background(), 12, 12, resp, cfg, server.URL); err != nil {
+		t.Fatalf("Dispatch returned unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(bodies) != 1 {
+		t.Fatalf("expected 1 postback carrying the items even with empty content, got %d", len(bodies))
+	}
+	if bodies[0].ContentType != "input_select" {
+		t.Errorf("ContentType = %q, want %q", bodies[0].ContentType, "input_select")
+	}
+	if len(bodies[0].Items) != 2 {
+		t.Fatalf("Items length = %d, want 2 — items must not be dropped when Content is empty", len(bodies[0].Items))
+	}
+}
+
+func TestDispatch_TextWithMedia_ExtractsAttachments(t *testing.T) {
+	var bodies []postbackBodyWithItems
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b postbackBodyWithItems
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	eng := service.NewDispatchEngine("")
+	cfg := model.BotConfig{
+		TextSegmentationEnabled: false,
+		DelayPerCharacter:       0,
+	}
+
+	resp := &aiModel.NormalizedResponse{
+		Content:     "Check this photo https://example.com/image.png",
+		ContentType: "text",
+	}
+	if err := eng.Dispatch(context.Background(), 11, 11, resp, cfg, server.URL); err != nil {
+		t.Fatalf("Dispatch returned unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Expect 2 postbacks: 1 text (media URL stripped) + 1 media-only
+	if len(bodies) != 2 {
+		t.Fatalf("expected 2 postbacks (text + media), got %d", len(bodies))
+	}
+
+	// First postback: text with media URL removed
+	if bodies[0].ContentType != "text" {
+		t.Errorf("bodies[0].ContentType = %q, want %q", bodies[0].ContentType, "text")
+	}
+	if strings.Contains(bodies[0].Content, "image.png") {
+		t.Errorf("bodies[0].Content must not contain media URL: %q", bodies[0].Content)
+	}
+	if len(bodies[0].Attachments) != 0 {
+		t.Errorf("bodies[0] must have no attachments, got %d", len(bodies[0].Attachments))
+	}
+
+	// Second postback: media-only (empty content, 1 attachment)
+	if bodies[1].Content != "" {
+		t.Errorf("bodies[1].Content = %q, want empty (media-only)", bodies[1].Content)
+	}
+	if len(bodies[1].Attachments) != 1 {
+		t.Fatalf("bodies[1].Attachments length = %d, want 1", len(bodies[1].Attachments))
+	}
+	if bodies[1].Attachments[0].URL != "https://example.com/image.png" {
+		t.Errorf("Attachments[0].URL = %q, want %q", bodies[1].Attachments[0].URL, "https://example.com/image.png")
+	}
+	if bodies[1].Attachments[0].FileType != "image" {
+		t.Errorf("Attachments[0].FileType = %q, want %q", bodies[1].Attachments[0].FileType, "image")
 	}
 }
 
@@ -265,7 +456,8 @@ func TestDispatch_ValidatesPostBody(t *testing.T) {
 	eng := service.NewDispatchEngine("")
 	cfg := model.BotConfig{TextSegmentationEnabled: false}
 
-	if err := eng.Dispatch(context.Background(), 5, 5, "test content", cfg, server.URL); err != nil {
+	resp5 := &aiModel.NormalizedResponse{Content: "test content", ContentType: "text"}
+	if err := eng.Dispatch(context.Background(), 5, 5, resp5, cfg, server.URL); err != nil {
 		t.Fatalf("Dispatch returned unexpected error: %v", err)
 	}
 
