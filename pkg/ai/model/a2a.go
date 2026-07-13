@@ -55,11 +55,9 @@ type A2AMessage struct {
 }
 
 type A2APart struct {
-	Type       string       `json:"type"`
-	Text       string       `json:"text,omitempty"`
-	Items      []SelectItem `json:"items,omitempty"`
-	IsMultiple bool         `json:"isMultiple,omitempty"`
-	SourceType string       `json:"sourceType,omitempty"`
+	Type  string       `json:"type"`
+	Text  string       `json:"text,omitempty"`
+	Items []SelectItem `json:"items,omitempty"`
 }
 
 // SelectItem represents a single selectable option from a Typebot choice block.
@@ -74,5 +72,4 @@ type NormalizedResponse struct {
 	Content     string
 	ContentType string       // "text" (default) or "input_select"
 	Items       []SelectItem // populated when ContentType == "input_select"
-	IsMultiple  bool
 }

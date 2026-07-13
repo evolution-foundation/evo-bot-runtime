@@ -157,7 +157,6 @@ func extractNormalized(resp *model.A2AResponse) *model.NormalizedResponse {
 				if nr.ContentType == "text" && len(part.Items) > 0 {
 					nr.ContentType = "input_select"
 					nr.Items = part.Items
-					nr.IsMultiple = part.IsMultiple
 				}
 			}
 		}
