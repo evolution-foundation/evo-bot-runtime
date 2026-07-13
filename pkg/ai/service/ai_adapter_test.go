@@ -217,6 +217,51 @@ func TestCall_Timeout_ReturnsAITimeout(t *testing.T) {
 	}
 }
 
+func TestCall_SelectResponse_PropagatesItems(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := aiModel.A2AResponse{
+			Result: &aiModel.A2AResult{
+				Artifacts: []aiModel.A2AArtifact{
+					{Parts: []aiModel.A2APart{
+						{Type: "text", Text: "Choose an option"},
+						{Type: "select", Items: []aiModel.SelectItem{
+							{Title: "Option A", Value: "a"},
+							{Title: "Option B", Value: "b"},
+						}},
+					}},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	adapter := aiService.NewAIAdapter(30)
+	resp, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
+		OutgoingURL: server.URL,
+		Message:     "test",
+		ApiKey:      "key",
+	})
+	if err != nil {
+		t.Fatalf("Call returned unexpected error: %v", err)
+	}
+	if resp.ContentType != "input_select" {
+		t.Errorf("resp.ContentType = %q, want %q", resp.ContentType, "input_select")
+	}
+	if resp.Content != "Choose an option" {
+		t.Errorf("resp.Content = %q, want %q", resp.Content, "Choose an option")
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("resp.Items length = %d, want 2", len(resp.Items))
+	}
+	if resp.Items[0].Title != "Option A" || resp.Items[0].Value != "a" {
+		t.Errorf("resp.Items[0] = %+v, want {Title: Option A, Value: a}", resp.Items[0])
+	}
+	if resp.Items[1].Title != "Option B" || resp.Items[1].Value != "b" {
+		t.Errorf("resp.Items[1] = %+v, want {Title: Option B, Value: b}", resp.Items[1])
+	}
+}
+
 func TestCall_NonOKStatus_ReturnsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

@@ -259,6 +259,139 @@ func TestSegmentContent_RuneAwareLimits(t *testing.T) {
 	}
 }
 
+// postbackBodyWithItems captures items and attachments for select/media tests.
+type postbackBodyWithItems struct {
+	Content     string               `json:"content"`
+	MessageType string               `json:"message_type"`
+	ContentType string               `json:"content_type"`
+	Items       []aiModel.SelectItem `json:"items,omitempty"`
+	Attachments []postbackAttachment `json:"attachments,omitempty"`
+}
+
+type postbackAttachment struct {
+	URL      string `json:"url"`
+	FileType string `json:"file_type"`
+}
+
+func TestDispatch_InputSelect_NoSegmentation(t *testing.T) {
+	var bodies []postbackBodyWithItems
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b postbackBodyWithItems
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	eng := service.NewDispatchEngine("")
+	cfg := model.BotConfig{
+		TextSegmentationEnabled: true,
+		TextSegmentationLimit:   5, // would normally split "choose an option" into multiple parts
+		DelayPerCharacter:       0,
+	}
+
+	items := []aiModel.SelectItem{
+		{Title: "Yes", Value: "yes"},
+		{Title: "No", Value: "no"},
+	}
+	resp := &aiModel.NormalizedResponse{
+		Content:     "choose an option",
+		ContentType: "input_select",
+		Items:       items,
+	}
+	if err := eng.Dispatch(context.Background(), 10, 10, resp, cfg, server.URL); err != nil {
+		t.Fatalf("Dispatch returned unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(bodies) != 1 {
+		t.Fatalf("input_select must not be segmented: expected 1 postback, got %d", len(bodies))
+	}
+	if bodies[0].ContentType != "input_select" {
+		t.Errorf("ContentType = %q, want %q", bodies[0].ContentType, "input_select")
+	}
+	if bodies[0].Content != "choose an option" {
+		t.Errorf("Content = %q, want %q", bodies[0].Content, "choose an option")
+	}
+	if len(bodies[0].Items) != 2 {
+		t.Fatalf("Items length = %d, want 2", len(bodies[0].Items))
+	}
+	if bodies[0].Items[0].Title != "Yes" || bodies[0].Items[0].Value != "yes" {
+		t.Errorf("Items[0] = %+v, want {Yes yes}", bodies[0].Items[0])
+	}
+	if bodies[0].Items[1].Title != "No" || bodies[0].Items[1].Value != "no" {
+		t.Errorf("Items[1] = %+v, want {No no}", bodies[0].Items[1])
+	}
+}
+
+func TestDispatch_TextWithMedia_ExtractsAttachments(t *testing.T) {
+	var bodies []postbackBodyWithItems
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b postbackBodyWithItems
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	eng := service.NewDispatchEngine("")
+	cfg := model.BotConfig{
+		TextSegmentationEnabled: false,
+		DelayPerCharacter:       0,
+	}
+
+	resp := &aiModel.NormalizedResponse{
+		Content:     "Check this photo https://example.com/image.png",
+		ContentType: "text",
+	}
+	if err := eng.Dispatch(context.Background(), 11, 11, resp, cfg, server.URL); err != nil {
+		t.Fatalf("Dispatch returned unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Expect 2 postbacks: 1 text (media URL stripped) + 1 media-only
+	if len(bodies) != 2 {
+		t.Fatalf("expected 2 postbacks (text + media), got %d", len(bodies))
+	}
+
+	// First postback: text with media URL removed
+	if bodies[0].ContentType != "text" {
+		t.Errorf("bodies[0].ContentType = %q, want %q", bodies[0].ContentType, "text")
+	}
+	if strings.Contains(bodies[0].Content, "image.png") {
+		t.Errorf("bodies[0].Content must not contain media URL: %q", bodies[0].Content)
+	}
+	if len(bodies[0].Attachments) != 0 {
+		t.Errorf("bodies[0] must have no attachments, got %d", len(bodies[0].Attachments))
+	}
+
+	// Second postback: media-only (empty content, 1 attachment)
+	if bodies[1].Content != "" {
+		t.Errorf("bodies[1].Content = %q, want empty (media-only)", bodies[1].Content)
+	}
+	if len(bodies[1].Attachments) != 1 {
+		t.Fatalf("bodies[1].Attachments length = %d, want 1", len(bodies[1].Attachments))
+	}
+	if bodies[1].Attachments[0].URL != "https://example.com/image.png" {
+		t.Errorf("Attachments[0].URL = %q, want %q", bodies[1].Attachments[0].URL, "https://example.com/image.png")
+	}
+	if bodies[1].Attachments[0].FileType != "image" {
+		t.Errorf("Attachments[0].FileType = %q, want %q", bodies[1].Attachments[0].FileType, "image")
+	}
+}
+
 func TestDispatch_ValidatesPostBody(t *testing.T) {
 	var received postbackBody
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
