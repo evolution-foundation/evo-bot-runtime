@@ -330,6 +330,56 @@ func TestDispatch_InputSelect_NoSegmentation(t *testing.T) {
 	}
 }
 
+// TestDispatch_InputSelect_EmptyContent_StillSendsItems is a regression test:
+// when the AI processor sends a select block with no accompanying question
+// text (Content == ""), the items must still reach the postback endpoint.
+// A prior version of the "skip empty residual" guard (meant for the
+// text/media path) also swallowed empty input_select parts, silently
+// dropping the items.
+func TestDispatch_InputSelect_EmptyContent_StillSendsItems(t *testing.T) {
+	var bodies []postbackBodyWithItems
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b postbackBodyWithItems
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	eng := service.NewDispatchEngine("")
+	cfg := model.BotConfig{TextSegmentationEnabled: false}
+
+	items := []aiModel.SelectItem{
+		{Title: "Yes", Value: "yes"},
+		{Title: "No", Value: "no"},
+	}
+	resp := &aiModel.NormalizedResponse{
+		Content:     "",
+		ContentType: "input_select",
+		Items:       items,
+	}
+	if err := eng.Dispatch(context.Background(), 12, 12, resp, cfg, server.URL); err != nil {
+		t.Fatalf("Dispatch returned unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(bodies) != 1 {
+		t.Fatalf("expected 1 postback carrying the items even with empty content, got %d", len(bodies))
+	}
+	if bodies[0].ContentType != "input_select" {
+		t.Errorf("ContentType = %q, want %q", bodies[0].ContentType, "input_select")
+	}
+	if len(bodies[0].Items) != 2 {
+		t.Fatalf("Items length = %d, want 2 — items must not be dropped when Content is empty", len(bodies[0].Items))
+	}
+}
+
 func TestDispatch_TextWithMedia_ExtractsAttachments(t *testing.T) {
 	var bodies []postbackBodyWithItems
 	var mu sync.Mutex

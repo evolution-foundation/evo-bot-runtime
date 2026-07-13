@@ -100,8 +100,10 @@ func (d *dispatchEngineImpl) Dispatch(
 
 	for i, part := range parts {
 		// Skip empty residual (e.g. response was only a media URL): the media
-		// postback below still runs.
-		if part == "" {
+		// postback below still runs. input_select is exempt — its items must
+		// always be delivered even when the AI processor sends no accompanying
+		// text (e.g. a choice block with no question text).
+		if part == "" && resp.ContentType != "input_select" {
 			continue
 		}
 
