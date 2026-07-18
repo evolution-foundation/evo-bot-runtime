@@ -11,6 +11,11 @@ type Config struct {
 	RedisURL             string
 	BotRuntimeSecret     string
 	AICallTimeoutSeconds int
+	// EVO-2167: retry the AI Processor call on transient failures (5xx/429/network)
+	// so a momentary blip (deploy, restart, DB hiccup) does not leave the customer
+	// without a reply. AICallMaxRetries is retries AFTER the first attempt.
+	AICallMaxRetries  int
+	AICallRetryBaseMs int
 }
 
 func Load() (*Config, error) {
@@ -27,12 +32,22 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	aiCallMaxRetries, err := getEnvIntOrDefault("AI_CALL_MAX_RETRIES", 2)
+	if err != nil {
+		return nil, err
+	}
+	aiCallRetryBaseMs, err := getEnvIntOrDefault("AI_CALL_RETRY_BASE_MS", 200)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		ListenAddr:           listenAddr,
 		RedisURL:             redisURL,
 		BotRuntimeSecret:     botRuntimeSecret,
 		AICallTimeoutSeconds: aiCallTimeout,
+		AICallMaxRetries:     aiCallMaxRetries,
+		AICallRetryBaseMs:    aiCallRetryBaseMs,
 	}, nil
 }
 

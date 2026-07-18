@@ -85,7 +85,7 @@ func TestCall_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(30)
+	adapter := aiService.NewAIAdapter(30, 0, 0)
 	resp, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL:    server.URL + "/api/v1/a2a/agent-123",
 		Message:        "hello world",
@@ -128,7 +128,7 @@ func TestCall_ContextID_FallsBackToNumericID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(30)
+	adapter := aiService.NewAIAdapter(30, 0, 0)
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL:    server.URL,
 		Message:        "test",
@@ -156,7 +156,7 @@ func TestCall_Success_MessageFormat(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(30)
+	adapter := aiService.NewAIAdapter(30, 0, 0)
 	resp, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL: server.URL,
 		Message:     "test",
@@ -183,7 +183,7 @@ func TestCall_ContextCancellation_ReturnsPipelineCancelled(t *testing.T) {
 		server.Close()
 	})
 
-	adapter := aiService.NewAIAdapter(30)
+	adapter := aiService.NewAIAdapter(30, 0, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -210,7 +210,7 @@ func TestCall_Timeout_ReturnsAITimeout(t *testing.T) {
 		server.Close()
 	})
 
-	adapter := aiService.NewAIAdapter(1) // 1 s timeout
+	adapter := aiService.NewAIAdapter(1, 0, 0) // 1 s timeout
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{OutgoingURL: server.URL, Message: "test", ApiKey: "key"})
 	if !errors.Is(err, brtErrors.ErrAITimeout) {
 		t.Errorf("expected ErrAITimeout, got %v", err)
@@ -223,7 +223,7 @@ func TestCall_NonOKStatus_ReturnsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := aiService.NewAIAdapter(30)
+	adapter := aiService.NewAIAdapter(30, 0, 0)
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{OutgoingURL: server.URL, Message: "test", ApiKey: "key"})
 	if err == nil {
 		t.Fatal("expected error for non-200 response, got nil")
