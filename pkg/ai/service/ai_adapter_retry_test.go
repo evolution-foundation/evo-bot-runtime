@@ -7,11 +7,14 @@ package service_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
 	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
 	aiService "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
 )
@@ -131,5 +134,27 @@ func TestCall_NoRetryWhenMaxRetriesZero(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("server calls = %d, want 1 (no retry)", got)
+	}
+}
+
+// AC #5 ("timeout por tentativa"): a per-attempt timeout must surface as ErrAITimeout
+// and must NOT be retried, even with retries enabled. Regression guard for the
+// per-attempt timeout scoping in doOnce.
+func TestCall_TimeoutIsNotRetried(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		time.Sleep(1200 * time.Millisecond) // exceed the 1s per-attempt timeout below
+		writeOK(w)
+	}))
+	defer server.Close()
+
+	adapter := aiService.NewAIAdapter(1, 3, 1) // 1s per-attempt timeout, retries enabled
+	_, err := adapter.Call(context.Background(), retryReq(server.URL))
+	if !errors.Is(err, brtErrors.ErrAITimeout) {
+		t.Fatalf("expected ErrAITimeout, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("server calls = %d, want 1 (per-attempt timeout must NOT be retried)", got)
 	}
 }

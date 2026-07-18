@@ -107,7 +107,30 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 
 	// EVO-2167: retry the send on transient failures (5xx/429/network) with
 	// exponential backoff + jitter. The body is built once and reused per attempt.
+	//
+	// Idempotency caveat (the card flagged this to validate): retrying 502/504/network
+	// can re-run an attempt the AI Processor already processed but whose response was
+	// lost in transit → a duplicate agent turn (ADK history, tool calls, LLM cost).
+	// The customer still gets exactly one reply: dispatch runs once, only after a
+	// successful attempt. The request body is byte-identical on every retry (built
+	// once above), so suppressing the duplicate server-side turn is the AI Processor's
+	// responsibility — tracked in EVO-2166. Keep this path free of extra side effects.
 	attempts := a.maxRetries + 1
+	perAttempt := time.Duration(a.timeoutSecs) * time.Second
+
+	// AC "teto de tempo total": bound the whole sequence with an overall backstop so a
+	// growing backoff or attempt count can never run unbounded. The ceiling is the
+	// natural worst case (attempts × per-attempt timeout + summed max backoff) plus one
+	// per-attempt of slack, so a genuine per-attempt timeout still surfaces as a timeout
+	// instead of being swallowed by this backstop. Each attempt keeps its own timeout.
+	overallCtx := ctx
+	if perAttempt > 0 {
+		ceiling := time.Duration(attempts+1)*perAttempt + time.Duration(a.maxRetries)*maxBackoff
+		var cancelAll context.CancelFunc
+		overallCtx, cancelAll = context.WithTimeout(ctx, ceiling)
+		defer cancelAll()
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
@@ -120,13 +143,13 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 				"delay_ms", delay.Milliseconds(),
 			)
 			select {
-			case <-ctx.Done():
+			case <-overallCtx.Done():
 				return nil, brtErrors.ErrPipelineCancelled
 			case <-time.After(delay):
 			}
 		}
 
-		resp, retryable, err := a.doOnce(ctx, url, body, req, start)
+		resp, retryable, err := a.doOnce(overallCtx, url, body, req, start)
 		if err == nil {
 			return resp, nil
 		}
