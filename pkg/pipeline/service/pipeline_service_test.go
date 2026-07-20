@@ -15,8 +15,8 @@ import (
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
 	"github.com/EvolutionAPI/evo-bot-runtime/internal/testhelpers"
-	aiIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
 	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
+	aiIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
 	debounceService "github.com/EvolutionAPI/evo-bot-runtime/pkg/debounce/service"
 	dispatchIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/dispatch/service"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
@@ -58,11 +58,14 @@ type mockDebounce struct {
 	startErr    error
 }
 
-func (m *mockDebounce) Start(_ context.Context, _, _ int64, _ string, _ model.BotConfig) error {
+func (m *mockDebounce) GetAttachments(_ context.Context, _, _ int64) ([]model.Attachment, error) {
+	return nil, nil
+}
+func (m *mockDebounce) Start(_ context.Context, _, _ int64, _ string, _ []model.Attachment, _ model.BotConfig) error {
 	m.startCalled = true
 	return m.startErr
 }
-func (m *mockDebounce) Reset(_ context.Context, _, _ int64, _ string, _ model.BotConfig) error {
+func (m *mockDebounce) Reset(_ context.Context, _, _ int64, _ string, _ []model.Attachment, _ model.BotConfig) error {
 	m.resetCalled = true
 	return nil
 }
@@ -77,7 +80,6 @@ type mockFailLockRepo struct {
 func (m *mockFailLockRepo) AcquireLock(_ context.Context, _, _ int64) (repository.Mutex, error) {
 	return nil, errors.New("lock unavailable")
 }
-
 
 // --- setup ---
 
@@ -709,4 +711,3 @@ func TestPipeline_DispatchError_ClearsState(t *testing.T) {
 		t.Errorf("state must be cleared after dispatch error, got exists=%d", exists)
 	}
 }
-

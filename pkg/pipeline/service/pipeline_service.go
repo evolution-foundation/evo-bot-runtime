@@ -33,11 +33,11 @@ type PipelineService interface {
 type pipelineEntry struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
-	cfg         model.BotConfig    // carries BotConfig from MessageEvent to dispatch stage
-	postbackURL string             // carries PostbackURL from MessageEvent to dispatch stage
-	outgoingURL string             // carries OutgoingURL (full A2A endpoint) from MessageEvent to AI stage
-	apiKey      string             // carries ApiKey from MessageEvent to AI stage
-	metadata    map[string]any     // carries Metadata from MessageEvent to AI stage (for tools context)
+	cfg         model.BotConfig // carries BotConfig from MessageEvent to dispatch stage
+	postbackURL string          // carries PostbackURL from MessageEvent to dispatch stage
+	outgoingURL string          // carries OutgoingURL (full A2A endpoint) from MessageEvent to AI stage
+	apiKey      string          // carries ApiKey from MessageEvent to AI stage
+	metadata    map[string]any  // carries Metadata from MessageEvent to AI stage (for tools context)
 }
 
 type pipelineService struct {
@@ -46,16 +46,16 @@ type pipelineService struct {
 	aiAdapter   aiIface.AIAdapter
 	dispatchEng dispatchIface.DispatchEngine
 	entries     sync.Map      // string → pipelineEntry
-	stopCh      chan struct{}  // closed by Shutdown to stop pollDebounceExpiry
-	stoppedCh   chan struct{}  // closed by pollDebounceExpiry when it exits
+	stopCh      chan struct{} // closed by Shutdown to stop pollDebounceExpiry
+	stoppedCh   chan struct{} // closed by pollDebounceExpiry when it exits
 	stopOnce    sync.Once     // ensures stopCh is closed exactly once
 }
 
 // NewPipelineService constructs the service. Returns interface (GEAR R03).
 func NewPipelineService(
-	repo        repository.PipelineRepository,
-	debounce    debounceIface.DebounceEngine,
-	aiAdapter   aiIface.AIAdapter,
+	repo repository.PipelineRepository,
+	debounce debounceIface.DebounceEngine,
+	aiAdapter aiIface.AIAdapter,
 	dispatchEng dispatchIface.DispatchEngine,
 ) PipelineService {
 	return &pipelineService{
@@ -169,7 +169,7 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		metadata:    event.Metadata,
 	})
 
-	if err := s.debounce.Start(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.BotConfig); err != nil {
+	if err := s.debounce.Start(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.Attachments, event.BotConfig); err != nil {
 		cancel()
 		s.entries.Delete(key)
 		return fmt.Errorf("pipeline.debounce.start: %w", err)
@@ -216,7 +216,7 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 
 	// debounce.Start appends to buffer; DebounceTime=0 means no timer (Story 2.1).
 	if err := s.debounce.Start(ctx, event.ContactID, event.ConversationID,
-		event.MessageContent, event.BotConfig); err != nil {
+		event.MessageContent, event.Attachments, event.BotConfig); err != nil {
 		cancel()
 		s.entries.Delete(key)
 		return fmt.Errorf("pipeline.skip_debounce.start: %w", err)
@@ -227,6 +227,13 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 		cancel()
 		s.entries.Delete(key)
 		return fmt.Errorf("pipeline.skip_debounce.get_buffer: %w", err)
+	}
+
+	atts, err := s.debounce.GetAttachments(ctx, event.ContactID, event.ConversationID)
+	if err != nil {
+		cancel()
+		s.entries.Delete(key)
+		return fmt.Errorf("pipeline.skip_debounce.get_attachments: %w", err)
 	}
 
 	newState := &model.PipelineState{Stage: model.StageAI, CreatedAt: time.Now()}
@@ -240,12 +247,12 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 		"contact_id", event.ContactID,
 		"conversation_id", event.ConversationID,
 	)
-	s.launchAIStage(event.ContactID, event.ConversationID, buffer)
+	s.launchAIStage(event.ContactID, event.ConversationID, buffer, atts)
 	return nil
 }
 
 func (s *pipelineService) resetDebounce(ctx context.Context, event *model.MessageEvent) error {
-	if err := s.debounce.Reset(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.BotConfig); err != nil {
+	if err := s.debounce.Reset(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.Attachments, event.BotConfig); err != nil {
 		return fmt.Errorf("pipeline.debounce.reset: %w", err)
 	}
 	slog.Info("pipeline.debounce.reset",
@@ -289,6 +296,16 @@ func (s *pipelineService) advanceToAI(contactID, conversationID int64) {
 		return
 	}
 
+	atts, err := s.debounce.GetAttachments(ctx, contactID, conversationID)
+	if err != nil {
+		slog.Error("pipeline.debounce.get_attachments_failed",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+			"error", err,
+		)
+		return
+	}
+
 	newState := &model.PipelineState{Stage: model.StageAI, CreatedAt: time.Now()}
 	if err := s.repo.SetState(ctx, contactID, conversationID, newState); err != nil {
 		slog.Error("pipeline.debounce.set_ai_state_failed",
@@ -304,13 +321,13 @@ func (s *pipelineService) advanceToAI(contactID, conversationID int64) {
 		"conversation_id", conversationID,
 		"buffer_len", len(buffer),
 	)
-	s.launchAIStage(contactID, conversationID, buffer)
+	s.launchAIStage(contactID, conversationID, buffer, atts)
 }
 
 // launchAIStage launches the AI goroutine with the stored pipeline context.
 // Must be called only after pipelineEntry is stored in s.entries (guaranteed by
 // startDebounce/skipDebounce/advanceToAI).
-func (s *pipelineService) launchAIStage(contactID, conversationID int64, buffer string) {
+func (s *pipelineService) launchAIStage(contactID, conversationID int64, buffer string, atts []model.Attachment) {
 	key := pairKey(contactID, conversationID)
 	v, ok := s.entries.Load(key)
 	if !ok {
@@ -329,12 +346,12 @@ func (s *pipelineService) launchAIStage(contactID, conversationID int64, buffer 
 		)
 		return
 	}
-	go s.runAIStage(entry.ctx, contactID, conversationID, buffer, entry.cfg, entry.postbackURL)
+	go s.runAIStage(entry.ctx, contactID, conversationID, buffer, atts, entry.cfg, entry.postbackURL)
 }
 
 // runAIStage is the AI stage goroutine body. ctx is pipelineEntry.ctx — cancelled by
 // Process when a new message arrives for the same pair.
-func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversationID int64, buffer string, cfg model.BotConfig, postbackURL string) {
+func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversationID int64, buffer string, atts []model.Attachment, cfg model.BotConfig, postbackURL string) {
 	defer s.recoverPipeline(contactID, conversationID)
 
 	slog.Info("pipeline.ai.started",
@@ -355,6 +372,17 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 		}
 	}
 
+	// EVO-2180: forward incoming media (aggregated over the debounce window) so the
+	// adapter can download + base64-encode it into A2A file parts.
+	aiAttachments := make([]aiModel.Attachment, 0, len(atts))
+	for _, a := range atts {
+		aiAttachments = append(aiAttachments, aiModel.Attachment{
+			URL:         a.URL,
+			ContentType: a.ContentType,
+			FileType:    a.FileType,
+		})
+	}
+
 	resp, err := s.aiAdapter.Call(ctx, &aiModel.A2ARequest{
 		OutgoingURL:    outgoingURL,
 		ContactID:      contactID,
@@ -362,6 +390,7 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 		ApiKey:         apiKey,
 		Message:        buffer,
 		Metadata:       metadata,
+		Attachments:    aiAttachments,
 	})
 	if err != nil {
 		switch {
@@ -417,12 +446,12 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 
 // launchDispatchStage launches the dispatch goroutine.
 func (s *pipelineService) launchDispatchStage(
-	ctx            context.Context,
-	contactID      int64,
+	ctx context.Context,
+	contactID int64,
 	conversationID int64,
-	resp           *aiModel.NormalizedResponse,
-	cfg            model.BotConfig,
-	postbackURL    string,
+	resp *aiModel.NormalizedResponse,
+	cfg model.BotConfig,
+	postbackURL string,
 ) {
 	go s.runDispatchStage(ctx, contactID, conversationID, resp.Content, cfg, postbackURL)
 }
@@ -430,17 +459,17 @@ func (s *pipelineService) launchDispatchStage(
 // runDispatchStage is the dispatch stage goroutine body. ctx is pipelineEntry.ctx — cancelled by
 // Process when a new message arrives for the same pair.
 func (s *pipelineService) runDispatchStage(
-	ctx            context.Context,
-	contactID      int64,
+	ctx context.Context,
+	contactID int64,
 	conversationID int64,
-	content        string,
-	cfg            model.BotConfig,
-	postbackURL    string,
+	content string,
+	cfg model.BotConfig,
+	postbackURL string,
 ) {
 	defer s.recoverPipeline(contactID, conversationID)
 
 	slog.Info("pipeline.dispatch.started",
-		"contact_id",      contactID,
+		"contact_id", contactID,
 		"conversation_id", conversationID,
 	)
 	start := time.Now()
@@ -455,14 +484,14 @@ func (s *pipelineService) runDispatchStage(
 			// atomically. A Delete here would race with the new event's Store
 			// and could delete the replacement entry.
 			slog.Info("pipeline.dispatch.cancelled",
-				"contact_id",      contactID,
+				"contact_id", contactID,
 				"conversation_id", conversationID,
 			)
 		default:
 			slog.Error("pipeline.dispatch.error",
-				"contact_id",      contactID,
+				"contact_id", contactID,
 				"conversation_id", conversationID,
-				"error",           err,
+				"error", err,
 			)
 			s.clearStateWithLog(contactID, conversationID)
 		}
@@ -475,9 +504,9 @@ func (s *pipelineService) runDispatchStage(
 	doneCtx, doneCancel := cleanupCtx()
 	if err := s.repo.SetState(doneCtx, contactID, conversationID, doneState); err != nil {
 		slog.Warn("pipeline.dispatch.set_done_failed",
-			"contact_id",      contactID,
+			"contact_id", contactID,
 			"conversation_id", conversationID,
-			"error",           err,
+			"error", err,
 		)
 	}
 	doneCancel()
@@ -485,9 +514,9 @@ func (s *pipelineService) runDispatchStage(
 	s.entries.Delete(pairKey(contactID, conversationID))
 
 	slog.Info("pipeline.dispatch.completed",
-		"contact_id",      contactID,
+		"contact_id", contactID,
 		"conversation_id", conversationID,
-		"duration",        dur.String(),
+		"duration", dur.String(),
 	)
 }
 

@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	neturl "net/url"
+	"path"
 	"time"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
@@ -18,6 +21,11 @@ import (
 
 // maxResponseBytes caps the AI Processor response body to prevent OOM on oversized payloads.
 const maxResponseBytes = 1 << 20 // 1 MiB
+
+// maxAttachmentBytes caps a single downloaded incoming attachment (EVO-2180).
+// Images routinely exceed maxResponseBytes (1 MiB); base64 inflates ~33%, so keep
+// this conservative relative to the processor's request-body limit.
+const maxAttachmentBytes = 15 << 20 // 15 MiB
 
 // maxBackoff caps the exponential backoff between retries so a large
 // AI_CALL_RETRY_BASE_MS or retry count cannot balloon the wait.
@@ -83,6 +91,12 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 	// fall back to the numeric ID only when the metadata is absent (legacy callers).
 	userID := contactUserID(req.Metadata, req.ContactID)
 
+	// Message parts: text first, then one file part per downloaded attachment.
+	// EVO-2180: downloads happen ONCE here (before Marshal), so the byte-identical
+	// body is reused across retries.
+	parts := []model.JSONRPCPart{{Type: "text", Text: req.Message}}
+	parts = append(parts, a.buildFileParts(ctx, req)...)
+
 	rpcReq := model.JSONRPCRequest{
 		JSONRPC: "2.0",
 		ID:      fmt.Sprintf("%d:%d", req.ContactID, req.ConversationID),
@@ -91,10 +105,8 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 			ContextID: contextID,
 			UserID:    userID,
 			Message: model.JSONRPCMessage{
-				Role: "user",
-				Parts: []model.JSONRPCPart{
-					{Type: "text", Text: req.Message},
-				},
+				Role:  "user",
+				Parts: parts,
 			},
 			Metadata: nonNilMetadata(req.Metadata),
 		},
@@ -285,6 +297,90 @@ func nonNilMetadata(m map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	return m
+}
+
+// buildFileParts downloads each incoming attachment and returns it as a base64 A2A
+// file part. A failure (unreachable/private URL, non-200, oversize, timeout) is
+// logged and skipped — the text-only message must always survive a media failure.
+// EVO-2180.
+func (a *aiAdapter) buildFileParts(ctx context.Context, req *model.A2ARequest) []model.JSONRPCPart {
+	if len(req.Attachments) == 0 {
+		return nil
+	}
+	parts := make([]model.JSONRPCPart, 0, len(req.Attachments))
+	for _, att := range req.Attachments {
+		if att.URL == "" {
+			continue
+		}
+		data, err := a.downloadAttachment(ctx, att.URL)
+		if err != nil {
+			slog.Warn("pipeline.ai.attachment.download_failed",
+				"contact_id", req.ContactID,
+				"conversation_id", req.ConversationID,
+				"file_type", att.FileType,
+				"error", err,
+			)
+			continue
+		}
+		mimeType := att.ContentType
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		parts = append(parts, model.JSONRPCPart{
+			Type: "file",
+			File: &model.JSONRPCFile{
+				Name:     attachmentName(att.URL),
+				MimeType: mimeType,
+				Bytes:    base64.StdEncoding.EncodeToString(data),
+			},
+		})
+		slog.Info("pipeline.ai.attachment.forwarded",
+			"contact_id", req.ContactID,
+			"conversation_id", req.ConversationID,
+			"file_type", att.FileType,
+			"bytes", len(data),
+		)
+	}
+	return parts
+}
+
+// downloadAttachment GETs the URL with the adapter's client and a per-download
+// timeout, reading at most maxAttachmentBytes.
+func (a *aiAdapter) downloadAttachment(ctx context.Context, url string) ([]byte, error) {
+	dlCtx, cancel := context.WithTimeout(ctx, time.Duration(a.timeoutSecs)*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("new_request: %w", err)
+	}
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("do: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	// +1 so an exactly-at-cap read is distinguishable from an oversize one.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	if len(data) > maxAttachmentBytes {
+		return nil, fmt.Errorf("attachment exceeds %d bytes", maxAttachmentBytes)
+	}
+	return data, nil
+}
+
+// attachmentName derives a filename from the URL path (fallback "file").
+func attachmentName(rawURL string) string {
+	if u, err := neturl.Parse(rawURL); err == nil {
+		if base := path.Base(u.Path); base != "" && base != "." && base != "/" {
+			return base
+		}
+	}
+	return "file"
 }
 
 // conversationContextID resolves the contextId for the JSON-RPC call. It reads the
