@@ -42,6 +42,7 @@ func fileParts(parts []aiModel.JSONRPCPart) []aiModel.JSONRPCPart {
 
 // The exfiltration shape: internal attachment URL, attacker-chosen outgoing_url.
 func TestCall_ForeignHostAttachment_IsNotFetched(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "evo-crm.internal")
 	var reached bool
 	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = true
@@ -57,8 +58,6 @@ func TestCall_ForeignHostAttachment_IsNotFetched(t *testing.T) {
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
-		// A CRM on a host that does not serve the attachment below.
-		PostbackURL: "http://evo-crm.internal:3000/webhooks/bot_runtime/postback/7",
 		Attachments: []aiModel.Attachment{{URL: internal.URL + "/latest/meta-data/", ContentType: "image/png"}},
 	}); err != nil {
 		t.Fatalf("a blocked attachment must not error the call: %v", err)
@@ -91,7 +90,6 @@ func TestCall_AllowlistedHost_IsFetched(t *testing.T) {
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
-		PostbackURL: "http://evo-crm.internal:3000/webhooks/bot_runtime/postback/7",
 		Attachments: []aiModel.Attachment{{URL: blob.URL + "/photo.png", ContentType: "image/png"}},
 	}); err != nil {
 		t.Fatalf("Call: %v", err)
@@ -109,6 +107,8 @@ func TestCall_AllowlistedHost_IsFetched(t *testing.T) {
 
 // Checking the declared URL alone is not enough: a 302 could walk it internal.
 func TestCall_RedirectOffTheAuthorizedHost_IsRefused(t *testing.T) {
+	// Authorizes 127.0.0.1 (the redirector) but not "localhost" (the target).
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	var reached bool
 	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = true
@@ -131,8 +131,6 @@ func TestCall_RedirectOffTheAuthorizedHost_IsRefused(t *testing.T) {
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
-		// Authorizes 127.0.0.1 (the redirector) but not "localhost" (the target).
-		PostbackURL: redirector.URL,
 		Attachments: []aiModel.Attachment{{URL: redirector.URL + "/photo.png", ContentType: "image/png"}},
 	}); err != nil {
 		t.Fatalf("a refused redirect must not error the call: %v", err)
@@ -148,6 +146,7 @@ func TestCall_RedirectOffTheAuthorizedHost_IsRefused(t *testing.T) {
 
 // Only http/https may be addressed.
 func TestCall_NonHTTPScheme_IsRejected(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	var parts []aiModel.JSONRPCPart
 	proc := capturingProc(&parts)
 	defer proc.Close()
@@ -155,7 +154,6 @@ func TestCall_NonHTTPScheme_IsRejected(t *testing.T) {
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
-		PostbackURL: proc.URL,
 		Attachments: []aiModel.Attachment{{URL: "file:///etc/passwd", ContentType: "image/png"}},
 	}); err != nil {
 		t.Fatalf("Call: %v", err)
@@ -165,7 +163,9 @@ func TestCall_NonHTTPScheme_IsRejected(t *testing.T) {
 	}
 }
 
-// Nothing authorized means nothing fetched — failing closed is the point.
+// Nothing authorized means nothing fetched — failing closed is the point. This is
+// also what an unconfigured deployment gets, which is why MEDIA_HOST_ALLOWLIST has
+// to be shipped alongside the service.
 func TestCall_NoAuthorizedHost_ForwardsNothing(t *testing.T) {
 	var reached bool
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

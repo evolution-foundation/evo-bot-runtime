@@ -50,9 +50,10 @@ const (
 	attachmentsTotalTimeFactor = 3
 )
 
-// mediaHostAllowlistEnv names extra hosts authorized to serve incoming media,
-// comma-separated, for deployments serving blobs off the CRM host (ActiveStorage
-// redirect mode, CDN). The default anchor is the event's own postback host.
+// mediaHostAllowlistEnv names the hosts authorized to serve incoming media,
+// comma-separated. It is the *only* source: an allowlist read out of the event
+// would be chosen by whoever sent the event, which is exactly who it must
+// constrain. Unset means no media is fetched.
 const mediaHostAllowlistEnv = "MEDIA_HOST_ALLOWLIST"
 
 // maxBackoff caps the exponential backoff between retries so a large
@@ -340,7 +341,7 @@ func (a *aiAdapter) buildFileParts(ctx context.Context, req *model.A2ARequest) [
 	defer cancelBudget()
 
 	// Built once per turn: the client closes over the authorized hosts.
-	hosts := allowedMediaHosts(req.PostbackURL)
+	hosts := allowedMediaHosts()
 	client := a.mediaClient(hosts)
 
 	parts := make([]model.JSONRPCPart, 0, len(req.Attachments))
@@ -355,7 +356,7 @@ func (a *aiAdapter) buildFileParts(ctx context.Context, req *model.A2ARequest) [
 				"conversation_id", req.ConversationID,
 				"file_type", att.FileType,
 				"error", err,
-				"hint", "set "+mediaHostAllowlistEnv+" when blobs are served off the CRM host",
+				"hint", "add the host to "+mediaHostAllowlistEnv,
 			)
 			continue
 		}
@@ -435,16 +436,11 @@ func (a *aiAdapter) attachmentTimeout() time.Duration {
 	return d
 }
 
-// allowedMediaHosts returns the hostnames authorized to serve this event's media.
+// allowedMediaHosts returns the hostnames authorized to serve incoming media.
 // An empty set authorizes nothing: failing closed beats fetching a URL the caller
 // chose.
-func allowedMediaHosts(postbackURL string) map[string]struct{} {
+func allowedMediaHosts() map[string]struct{} {
 	hosts := make(map[string]struct{}, 2)
-	if u, err := neturl.Parse(postbackURL); err == nil {
-		if h := strings.ToLower(u.Hostname()); h != "" {
-			hosts[h] = struct{}{}
-		}
-	}
 	for _, h := range strings.Split(os.Getenv(mediaHostAllowlistEnv), ",") {
 		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
 			hosts[h] = struct{}{}
