@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/go-redsync/redsync/v4"
+	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
@@ -183,6 +183,45 @@ func TestSetTimer_DeleteTimer_TimerExists(t *testing.T) {
 	}
 }
 
+func TestAppendGetAttachments_RoundTrip(t *testing.T) {
+	repo, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	var contactID, convID int64 = 4242, 4243
+
+	atts := []model.Attachment{
+		{URL: "http://x/a.png", ContentType: "image/png", FileType: "image"},
+		{URL: "http://x/b.ogg", ContentType: "audio/ogg", FileType: "audio"},
+	}
+	// Two appends (as a multi-message debounce window would) must aggregate in order.
+	if err := repo.AppendAttachments(ctx, contactID, convID, atts[:1]); err != nil {
+		t.Fatalf("AppendAttachments 1: %v", err)
+	}
+	if err := repo.AppendAttachments(ctx, contactID, convID, atts[1:]); err != nil {
+		t.Fatalf("AppendAttachments 2: %v", err)
+	}
+
+	got, err := repo.GetAttachments(ctx, contactID, convID)
+	if err != nil {
+		t.Fatalf("GetAttachments: %v", err)
+	}
+	if len(got) != 2 || got[0].URL != atts[0].URL || got[1].FileType != "audio" {
+		t.Fatalf("GetAttachments = %+v, want ordered %+v", got, atts)
+	}
+
+	// Empty append is a no-op.
+	if err := repo.AppendAttachments(ctx, contactID, convID, nil); err != nil {
+		t.Fatalf("AppendAttachments(nil): %v", err)
+	}
+
+	// Empty key returns an empty slice.
+	empty, err := repo.GetAttachments(ctx, 9191, 9191)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("GetAttachments(empty) = %v (err %v)", empty, err)
+	}
+}
+
 func TestClearState_DeletesAllKeys(t *testing.T) {
 	repo, cleanup := setupTestRepo(t)
 	defer cleanup()
@@ -190,9 +229,10 @@ func TestClearState_DeletesAllKeys(t *testing.T) {
 	ctx := context.Background()
 	var contactID, convID int64 = 103, 203
 
-	// Set state, buffer, timer
+	// Set state, buffer, attachments, timer
 	_ = repo.SetState(ctx, contactID, convID, &model.PipelineState{Stage: model.StageAI})
 	_ = repo.AppendToBuffer(ctx, contactID, convID, "msg")
+	_ = repo.AppendAttachments(ctx, contactID, convID, []model.Attachment{{URL: "http://x/a.png", ContentType: "image/png", FileType: "image"}})
 	_ = repo.SetTimer(ctx, contactID, convID, 30*time.Second)
 
 	if err := repo.ClearState(ctx, contactID, convID); err != nil {
@@ -207,6 +247,11 @@ func TestClearState_DeletesAllKeys(t *testing.T) {
 	buf, err := repo.GetBuffer(ctx, contactID, convID)
 	if err != nil || len(buf) != 0 {
 		t.Errorf("expected empty buffer after ClearState, got %v (err: %v)", buf, err)
+	}
+
+	atts, err := repo.GetAttachments(ctx, contactID, convID)
+	if err != nil || len(atts) != 0 {
+		t.Errorf("expected empty attachments after ClearState, got %v (err: %v)", atts, err)
 	}
 
 	exists, err := repo.TimerExists(ctx, contactID, convID)

@@ -54,6 +54,7 @@ func (r *redisPipelineRepository) ClearState(ctx context.Context, contactID, con
 	keys := []string{
 		stateKey(contactID, conversationID),
 		bufferKey(contactID, conversationID),
+		attachBufferKey(contactID, conversationID), // EVO-2180: clear media with the text buffer
 		timerKey(contactID, conversationID),
 	}
 	return r.rdb.Del(ctx, keys...).Err()
@@ -65,6 +66,41 @@ func (r *redisPipelineRepository) AppendToBuffer(ctx context.Context, contactID,
 
 func (r *redisPipelineRepository) GetBuffer(ctx context.Context, contactID, conversationID int64) ([]string, error) {
 	return r.rdb.LRange(ctx, bufferKey(contactID, conversationID), 0, -1).Result()
+}
+
+// AppendAttachments RPushes each attachment (JSON-encoded) onto the media buffer,
+// aggregating across the debounce window like the text buffer. EVO-2180.
+func (r *redisPipelineRepository) AppendAttachments(ctx context.Context, contactID, conversationID int64, atts []model.Attachment) error {
+	if len(atts) == 0 {
+		return nil
+	}
+	values := make([]interface{}, 0, len(atts))
+	for _, att := range atts {
+		b, err := json.Marshal(att)
+		if err != nil {
+			return fmt.Errorf("pipeline.repository.append_attachments marshal: %w", err)
+		}
+		values = append(values, b)
+	}
+	return r.rdb.RPush(ctx, attachBufferKey(contactID, conversationID), values...).Err()
+}
+
+// GetAttachments returns the media aggregated during the debounce window. EVO-2180.
+func (r *redisPipelineRepository) GetAttachments(ctx context.Context, contactID, conversationID int64) ([]model.Attachment, error) {
+	raw, err := r.rdb.LRange(ctx, attachBufferKey(contactID, conversationID), 0, -1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("pipeline.repository.get_attachments: %w", err)
+	}
+	atts := make([]model.Attachment, 0, len(raw))
+	for _, s := range raw {
+		var att model.Attachment
+		if err := json.Unmarshal([]byte(s), &att); err != nil {
+			slog.Warn("pipeline.repository.get_attachments.skip_malformed", "error", err)
+			continue
+		}
+		atts = append(atts, att)
+	}
+	return atts, nil
 }
 
 func (r *redisPipelineRepository) SetTimer(ctx context.Context, contactID, conversationID int64, ttl time.Duration) error {
@@ -137,6 +173,10 @@ func stateKey(contactID, conversationID int64) string {
 
 func bufferKey(contactID, conversationID int64) string {
 	return fmt.Sprintf("bot_runtime:buffer:%d:%d", contactID, conversationID)
+}
+
+func attachBufferKey(contactID, conversationID int64) string {
+	return fmt.Sprintf("bot_runtime:attach:%d:%d", contactID, conversationID)
 }
 
 func lockKey(contactID, conversationID int64) string {

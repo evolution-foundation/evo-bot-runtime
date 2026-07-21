@@ -12,9 +12,10 @@ import (
 
 // DebounceEngine manages per-pair debounce timers and message buffers.
 type DebounceEngine interface {
-	Start(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig) error
-	Reset(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig) error
+	Start(ctx context.Context, contactID, conversationID int64, content string, atts []model.Attachment, cfg model.BotConfig) error
+	Reset(ctx context.Context, contactID, conversationID int64, content string, atts []model.Attachment, cfg model.BotConfig) error
 	GetBuffer(ctx context.Context, contactID, conversationID int64) (string, error)
+	GetAttachments(ctx context.Context, contactID, conversationID int64) ([]model.Attachment, error)
 	TimerExists(ctx context.Context, contactID, conversationID int64) (bool, error)
 }
 
@@ -27,9 +28,12 @@ func NewDebounceEngine(repo repository.PipelineRepository) DebounceEngine {
 	return &debounceEngine{repo: repo}
 }
 
-func (d *debounceEngine) Start(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig) error {
+func (d *debounceEngine) Start(ctx context.Context, contactID, conversationID int64, content string, atts []model.Attachment, cfg model.BotConfig) error {
 	if err := d.repo.AppendToBuffer(ctx, contactID, conversationID, content); err != nil {
 		return fmt.Errorf("debounce.start.append: %w", err)
+	}
+	if err := d.repo.AppendAttachments(ctx, contactID, conversationID, atts); err != nil {
+		return fmt.Errorf("debounce.start.append_attachments: %w", err)
 	}
 	if cfg.DebounceTime > 0 {
 		ttl := time.Duration(cfg.DebounceTime) * time.Second
@@ -40,9 +44,12 @@ func (d *debounceEngine) Start(ctx context.Context, contactID, conversationID in
 	return nil
 }
 
-func (d *debounceEngine) Reset(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig) error {
+func (d *debounceEngine) Reset(ctx context.Context, contactID, conversationID int64, content string, atts []model.Attachment, cfg model.BotConfig) error {
 	if err := d.repo.AppendToBuffer(ctx, contactID, conversationID, content); err != nil {
 		return fmt.Errorf("debounce.reset.append: %w", err)
+	}
+	if err := d.repo.AppendAttachments(ctx, contactID, conversationID, atts); err != nil {
+		return fmt.Errorf("debounce.reset.append_attachments: %w", err)
 	}
 	if cfg.DebounceTime > 0 {
 		ttl := time.Duration(cfg.DebounceTime) * time.Second
@@ -59,6 +66,10 @@ func (d *debounceEngine) GetBuffer(ctx context.Context, contactID, conversationI
 		return "", fmt.Errorf("debounce.get_buffer: %w", err)
 	}
 	return strings.Join(entries, "\n\n"), nil
+}
+
+func (d *debounceEngine) GetAttachments(ctx context.Context, contactID, conversationID int64) ([]model.Attachment, error) {
+	return d.repo.GetAttachments(ctx, contactID, conversationID)
 }
 
 func (d *debounceEngine) TimerExists(ctx context.Context, contactID, conversationID int64) (bool, error) {

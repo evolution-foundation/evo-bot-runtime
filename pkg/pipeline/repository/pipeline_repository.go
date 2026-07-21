@@ -22,6 +22,11 @@ type PipelineRepository interface {
 	AppendToBuffer(ctx context.Context, contactID, conversationID int64, content string) error
 	GetBuffer(ctx context.Context, contactID, conversationID int64) ([]string, error)
 
+	// EVO-2180: incoming media buffer, aggregated across the debounce window exactly
+	// like the text buffer. Cleared together with the text buffer in ClearState.
+	AppendAttachments(ctx context.Context, contactID, conversationID int64, atts []model.Attachment) error
+	GetAttachments(ctx context.Context, contactID, conversationID int64) ([]model.Attachment, error)
+
 	SetTimer(ctx context.Context, contactID, conversationID int64, ttl time.Duration) error
 	DeleteTimer(ctx context.Context, contactID, conversationID int64) error
 	TimerExists(ctx context.Context, contactID, conversationID int64) (bool, error)

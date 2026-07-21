@@ -3,13 +3,18 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
+	"mime"
 	"net/http"
+	neturl "net/url"
+	"path"
+	"strings"
 	"time"
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
@@ -18,6 +23,31 @@ import (
 
 // maxResponseBytes caps the AI Processor response body to prevent OOM on oversized payloads.
 const maxResponseBytes = 1 << 20 // 1 MiB
+
+// maxAttachmentBytes caps a single downloaded incoming attachment (EVO-2180).
+// Images routinely exceed maxResponseBytes (1 MiB); base64 inflates ~33%, so keep
+// this conservative relative to the processor's request-body limit.
+const maxAttachmentBytes = 15 << 20 // 15 MiB
+
+// maxAttachmentsTotalBytes caps the SUM of every attachment forwarded in one call.
+// The debounce window aggregates the media of all messages in it, so a per-file cap
+// alone lets a photo burst build a body of len(attachments) x maxAttachmentBytes.
+// Base64 inflates that ~33% and the gateway rejects the POST (nginx
+// client_max_body_size) — and a 413 is not retryable, so the customer would lose the
+// text reply as well. Over budget, the remaining attachments are dropped and the
+// call proceeds with what fits.
+const maxAttachmentsTotalBytes = 20 << 20 // 20 MiB (~27 MiB once base64-encoded)
+
+// Attachment downloads run before the AI call and outside its retry ceiling, so they
+// need a bound of their own: reusing the AI timeout (AI_CALL_TIMEOUT_SECONDS,
+// default 30s) meant an unreachable media host stalled every turn for
+// timeout x len(attachments) before the processor was even called.
+// maxAttachmentDownload bounds one download; the whole set shares
+// attachmentsTotalTimeFactor times that.
+const (
+	maxAttachmentDownload      = 10 * time.Second
+	attachmentsTotalTimeFactor = 3
+)
 
 // maxBackoff caps the exponential backoff between retries so a large
 // AI_CALL_RETRY_BASE_MS or retry count cannot balloon the wait.
@@ -83,6 +113,12 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 	// fall back to the numeric ID only when the metadata is absent (legacy callers).
 	userID := contactUserID(req.Metadata, req.ContactID)
 
+	// Message parts: text first, then one file part per downloaded attachment.
+	// EVO-2180: downloads happen ONCE here (before Marshal), so the byte-identical
+	// body is reused across retries.
+	parts := []model.JSONRPCPart{{Type: "text", Text: req.Message}}
+	parts = append(parts, a.buildFileParts(ctx, req)...)
+
 	rpcReq := model.JSONRPCRequest{
 		JSONRPC: "2.0",
 		ID:      fmt.Sprintf("%d:%d", req.ContactID, req.ConversationID),
@@ -91,10 +127,8 @@ func (a *aiAdapter) Call(ctx context.Context, req *model.A2ARequest) (*model.Nor
 			ContextID: contextID,
 			UserID:    userID,
 			Message: model.JSONRPCMessage{
-				Role: "user",
-				Parts: []model.JSONRPCPart{
-					{Type: "text", Text: req.Message},
-				},
+				Role:  "user",
+				Parts: parts,
 			},
 			Metadata: nonNilMetadata(req.Metadata),
 		},
@@ -285,6 +319,192 @@ func nonNilMetadata(m map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	return m
+}
+
+// buildFileParts downloads each incoming attachment and returns it as a base64 A2A
+// file part. A failure (unreachable/private URL, non-200, oversize, timeout) is
+// logged and skipped — the text-only message must always survive a media failure.
+// EVO-2180.
+func (a *aiAdapter) buildFileParts(ctx context.Context, req *model.A2ARequest) []model.JSONRPCPart {
+	if len(req.Attachments) == 0 {
+		return nil
+	}
+	perDownload := a.attachmentTimeout()
+	budgetCtx, cancelBudget := context.WithTimeout(ctx, attachmentsTotalTimeFactor*perDownload)
+	defer cancelBudget()
+
+	parts := make([]model.JSONRPCPart, 0, len(req.Attachments))
+	remaining := maxAttachmentsTotalBytes
+	for i, att := range req.Attachments {
+		if att.URL == "" {
+			continue
+		}
+		if budgetCtx.Err() != nil {
+			slog.Warn("pipeline.ai.attachment.budget_exhausted",
+				"contact_id", req.ContactID,
+				"conversation_id", req.ConversationID,
+				"limit", "time",
+				"forwarded", len(parts),
+				"dropped", len(req.Attachments)-i,
+			)
+			break
+		}
+		limit := min(maxAttachmentBytes, remaining)
+		if limit <= 0 {
+			slog.Warn("pipeline.ai.attachment.budget_exhausted",
+				"contact_id", req.ContactID,
+				"conversation_id", req.ConversationID,
+				"limit", "bytes",
+				"forwarded", len(parts),
+				"dropped", len(req.Attachments)-i,
+			)
+			break
+		}
+		data, respContentType, err := a.downloadAttachment(budgetCtx, att.URL, perDownload, limit)
+		if err != nil {
+			slog.Warn("pipeline.ai.attachment.download_failed",
+				"contact_id", req.ContactID,
+				"conversation_id", req.ConversationID,
+				"file_type", att.FileType,
+				"error", err,
+			)
+			continue
+		}
+		mimeType, ok := resolveMimeType(att, respContentType)
+		if !ok {
+			slog.Warn("pipeline.ai.attachment.skipped_not_media",
+				"contact_id", req.ContactID,
+				"conversation_id", req.ConversationID,
+				"file_type", att.FileType,
+				"declared_content_type", att.ContentType,
+				"response_content_type", respContentType,
+			)
+			continue
+		}
+		remaining -= len(data)
+		parts = append(parts, model.JSONRPCPart{
+			Type: "file",
+			File: &model.JSONRPCFile{
+				Name:     attachmentName(att.URL),
+				MimeType: mimeType,
+				Bytes:    base64.StdEncoding.EncodeToString(data),
+			},
+		})
+		slog.Info("pipeline.ai.attachment.forwarded",
+			"contact_id", req.ContactID,
+			"conversation_id", req.ConversationID,
+			"file_type", att.FileType,
+			"mime_type", mimeType,
+			"bytes", len(data),
+		)
+	}
+	return parts
+}
+
+// attachmentTimeout is the per-download timeout: maxAttachmentDownload, shrunk to
+// the configured AI timeout when that is smaller (so a deployment tuned for fast
+// failure does not wait longer on media than on the AI call itself).
+func (a *aiAdapter) attachmentTimeout() time.Duration {
+	d := maxAttachmentDownload
+	if t := time.Duration(a.timeoutSecs) * time.Second; t > 0 && t < d {
+		d = t
+	}
+	return d
+}
+
+// downloadAttachment GETs the URL with the adapter's client and the given timeout,
+// reading at most limit bytes. It returns the body and the response Content-Type so
+// the caller can decide what the bytes actually are.
+func (a *aiAdapter) downloadAttachment(ctx context.Context, url string, timeout time.Duration, limit int) ([]byte, string, error) {
+	dlCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("new_request: %w", err)
+	}
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, "", fmt.Errorf("do: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	// +1 so an exactly-at-cap read is distinguishable from an oversize one.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("read: %w", err)
+	}
+	if len(data) > limit {
+		return nil, "", fmt.Errorf("attachment exceeds the %d bytes still available in this call", limit)
+	}
+	return data, resp.Header.Get("Content-Type"), nil
+}
+
+// resolveMimeType picks the mime type sent to the AI Processor, which forwards it
+// verbatim into the model call (runner_utils: Blob(mime_type=content_type)) — so a
+// wrong value here surfaces as a processor-side failure, not a graceful skip.
+//
+// It prefers the Content-Type of the response actually downloaded (that describes
+// the bytes in hand), falls back to what the CRM declared, then to the URL
+// extension. It returns false when the payload is a web page: a Rails proxy URL
+// answering 200 with an error/login page would otherwise be forwarded as a valid
+// image. It also returns false when nothing better than application/octet-stream
+// can be determined — an opaque blob is rejected by the model APIs, so dropping it
+// keeps the text reply alive instead of failing the whole turn.
+func resolveMimeType(att model.Attachment, respContentType string) (string, bool) {
+	respType := mediaTypeOf(respContentType)
+	declared := mediaTypeOf(att.ContentType)
+	if isWebPage(respType) || isWebPage(declared) {
+		return "", false
+	}
+	for _, candidate := range []string{respType, declared, mediaTypeOf(mimeFromURL(att.URL))} {
+		if candidate != "" && candidate != octetStream {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+const octetStream = "application/octet-stream"
+
+// mediaTypeOf normalises a Content-Type header to its bare media type
+// ("image/jpeg; charset=binary" → "image/jpeg").
+func mediaTypeOf(contentType string) string {
+	if contentType == "" {
+		return ""
+	}
+	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
+		return mt
+	}
+	return strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+}
+
+// isWebPage reports whether a media type is an HTML document rather than media.
+func isWebPage(mediaType string) bool {
+	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
+}
+
+// mimeFromURL guesses a mime type from the URL's file extension. ActiveStorage
+// proxy URLs keep the original filename, so this recovers the type when neither the
+// CRM nor the storage backend declares a useful one.
+func mimeFromURL(rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return mime.TypeByExtension(path.Ext(u.Path))
+}
+
+// attachmentName derives a filename from the URL path (fallback "file").
+func attachmentName(rawURL string) string {
+	if u, err := neturl.Parse(rawURL); err == nil {
+		if base := path.Base(u.Path); base != "" && base != "." && base != "/" {
+			return base
+		}
+	}
+	return "file"
 }
 
 // conversationContextID resolves the contextId for the JSON-RPC call. It reads the

@@ -15,8 +15,8 @@ import (
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
 	"github.com/EvolutionAPI/evo-bot-runtime/internal/testhelpers"
-	aiIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
 	aiModel "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
+	aiIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
 	debounceService "github.com/EvolutionAPI/evo-bot-runtime/pkg/debounce/service"
 	dispatchIface "github.com/EvolutionAPI/evo-bot-runtime/pkg/dispatch/service"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
@@ -58,11 +58,14 @@ type mockDebounce struct {
 	startErr    error
 }
 
-func (m *mockDebounce) Start(_ context.Context, _, _ int64, _ string, _ model.BotConfig) error {
+func (m *mockDebounce) GetAttachments(_ context.Context, _, _ int64) ([]model.Attachment, error) {
+	return nil, nil
+}
+func (m *mockDebounce) Start(_ context.Context, _, _ int64, _ string, _ []model.Attachment, _ model.BotConfig) error {
 	m.startCalled = true
 	return m.startErr
 }
-func (m *mockDebounce) Reset(_ context.Context, _, _ int64, _ string, _ model.BotConfig) error {
+func (m *mockDebounce) Reset(_ context.Context, _, _ int64, _ string, _ []model.Attachment, _ model.BotConfig) error {
 	m.resetCalled = true
 	return nil
 }
@@ -77,7 +80,6 @@ type mockFailLockRepo struct {
 func (m *mockFailLockRepo) AcquireLock(_ context.Context, _, _ int64) (repository.Mutex, error) {
 	return nil, errors.New("lock unavailable")
 }
-
 
 // --- setup ---
 
@@ -710,3 +712,107 @@ func TestPipeline_DispatchError_ClearsState(t *testing.T) {
 	}
 }
 
+// EVO-2180: the event's attachments must survive the whole path — HTTP event →
+// debounce buffer in Redis → A2ARequest. The adapter-level test proves the file
+// part is built from an A2ARequest; this one proves the A2ARequest actually gets
+// the media, which is the seam a refactor would silently drop.
+func TestProcess_ForwardsEventAttachmentsToAIRequest(t *testing.T) {
+	got := make(chan []aiModel.Attachment, 1)
+	capturingAI := &mockAIAdapter{
+		callFn: func(_ context.Context, req *aiModel.A2ARequest) (*aiModel.NormalizedResponse, error) {
+			got <- req.Attachments
+			return &aiModel.NormalizedResponse{Content: "ok"}, nil
+		},
+	}
+	svc, _ := setupSvcWithAI(t, capturingAI)
+	ctx := context.Background()
+	// Start from a clean pair: a state left behind by an earlier run would send
+	// Process down the reset path instead of the AI stage.
+	clearPair(t, svc, 2180)
+
+	event := &model.MessageEvent{
+		ContactID: 2180, ConversationID: 2180,
+		MessageContent: "olha essa foto",
+		BotConfig:      model.BotConfig{DebounceTime: 0}, // straight to the AI stage
+		Attachments: []model.Attachment{
+			{URL: "http://crm/rails/blob/a.png", ContentType: "image/png", FileType: "image"},
+		},
+	}
+	if err := svc.Process(ctx, event); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+
+	select {
+	case atts := <-got:
+		if len(atts) != 1 {
+			t.Fatalf("A2ARequest.Attachments = %+v, want the event's single attachment", atts)
+		}
+		if atts[0].URL != "http://crm/rails/blob/a.png" || atts[0].ContentType != "image/png" || atts[0].FileType != "image" {
+			t.Errorf("attachment reached the adapter as %+v, want the event's values intact", atts[0])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("AI adapter was never called")
+	}
+}
+
+// Media aggregates across the debounce window the same way text does: every message
+// in the window contributes its attachments to the single AI call.
+func TestProcess_AggregatesAttachmentsAcrossDebounceWindow(t *testing.T) {
+	got := make(chan []aiModel.Attachment, 1)
+	capturingAI := &mockAIAdapter{
+		callFn: func(_ context.Context, req *aiModel.A2ARequest) (*aiModel.NormalizedResponse, error) {
+			got <- req.Attachments
+			return &aiModel.NormalizedResponse{Content: "ok"}, nil
+		},
+	}
+	svc, _ := setupSvcWithAI(t, capturingAI)
+	ctx := context.Background()
+	clearPair(t, svc, 2181)
+
+	first := &model.MessageEvent{
+		ContactID: 2181, ConversationID: 2181,
+		MessageContent: "foto 1",
+		BotConfig:      model.BotConfig{DebounceTime: 1},
+		Attachments:    []model.Attachment{{URL: "http://crm/a.png", ContentType: "image/png", FileType: "image"}},
+	}
+	if err := svc.Process(ctx, first); err != nil {
+		t.Fatalf("Process(first): %v", err)
+	}
+	second := &model.MessageEvent{
+		ContactID: 2181, ConversationID: 2181,
+		MessageContent: "foto 2",
+		BotConfig:      model.BotConfig{DebounceTime: 1},
+		Attachments:    []model.Attachment{{URL: "http://crm/b.png", ContentType: "image/png", FileType: "image"}},
+	}
+	if err := svc.Process(ctx, second); err != nil {
+		t.Fatalf("Process(second): %v", err)
+	}
+
+	// Drop the timer instead of sleeping through the window: advanceToAI bails out
+	// while the timer key is still alive.
+	if err := svc.repo.DeleteTimer(ctx, 2181, 2181); err != nil {
+		t.Fatalf("DeleteTimer: %v", err)
+	}
+	svc.advanceToAI(2181, 2181)
+
+	select {
+	case atts := <-got:
+		if len(atts) != 2 || atts[0].URL != "http://crm/a.png" || atts[1].URL != "http://crm/b.png" {
+			t.Fatalf("A2ARequest.Attachments = %+v, want both window attachments in order", atts)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("AI adapter was never called")
+	}
+}
+
+// clearPair wipes every Redis key of a pair so a test does not inherit state from
+// a previous run (the suite only flushes when TEST_REDIS_FLUSH=1).
+func clearPair(t *testing.T, svc *pipelineService, id int64) {
+	t.Helper()
+	if err := svc.repo.ClearState(context.Background(), id, id); err != nil {
+		t.Fatalf("ClearState(%d): %v", id, err)
+	}
+	t.Cleanup(func() {
+		_ = svc.repo.ClearState(context.Background(), id, id)
+	})
+}
