@@ -398,6 +398,9 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 		Message:        buffer,
 		Metadata:       metadata,
 		Attachments:    aiAttachments,
+		// Anchors the media host allowlist: attachments are served by the same CRM
+		// that hands us the postback URL.
+		PostbackURL: postbackURL,
 	})
 	if err != nil {
 		switch {

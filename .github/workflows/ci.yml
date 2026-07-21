@@ -1,0 +1,42 @@
+name: CI
+
+# Until now the only workflow here was docker-publish.yml, so nothing ran the Go
+# suite on a PR: `test/e2e` sat non-compiling from EVO-558 to EVO-2180 without a
+# single red check. The repository tests need Redis, which is why this runs it as a
+# service container rather than skipping the packages that touch it.
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      REDIS_TEST_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...

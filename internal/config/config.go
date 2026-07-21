@@ -27,7 +27,15 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	botRuntimeSecret := os.Getenv("BOT_RUNTIME_SECRET")
+	// Required, not optional: SecretMiddleware compares the header against this
+	// value, so an empty secret authenticates every caller that simply omits the
+	// header. /events accepts an outgoing_url and (since EVO-2180) attachment URLs
+	// this service fetches itself, which makes an unauthenticated endpoint an
+	// outbound-request gadget rather than just a spam vector.
+	botRuntimeSecret, err := mustGetEnv("BOT_RUNTIME_SECRET")
+	if err != nil {
+		return nil, err
+	}
 	aiCallTimeout, err := getEnvIntOrDefault("AI_CALL_TIMEOUT_SECONDS", 30)
 	if err != nil {
 		return nil, err

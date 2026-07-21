@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	neturl "net/url"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -48,6 +49,23 @@ const (
 	maxAttachmentDownload      = 10 * time.Second
 	attachmentsTotalTimeFactor = 3
 )
+
+// mediaHostAllowlistEnv names the extra hosts authorized to serve incoming media.
+//
+// Attachment URLs arrive inside the /events payload and downloading one is a request
+// this service makes from inside the network, so an unvalidated URL turns /events
+// into an SSRF gadget: the fetched bytes are handed straight to the outgoing_url
+// that came in the same payload. The media is served by the CRM that sent the event,
+// so the postback host — already mandatory in MessageEvent.Validate — is the natural
+// anchor and needs no new configuration.
+//
+// This variable is the escape hatch for deployments that serve blobs from somewhere
+// else: ActiveStorage in redirect mode (ATTACHMENT_DELIVERY=redirect) hands out
+// presigned S3/MinIO links, and a CDN in front of the CRM is the other common case.
+// Comma-separated hostnames, no scheme and no port, e.g.
+// "minio.internal,cdn.example.com". An attachment on any other host is skipped with
+// a log line and the text reply still goes out.
+const mediaHostAllowlistEnv = "MEDIA_HOST_ALLOWLIST"
 
 // maxBackoff caps the exponential backoff between retries so a large
 // AI_CALL_RETRY_BASE_MS or retry count cannot balloon the wait.
@@ -333,10 +351,26 @@ func (a *aiAdapter) buildFileParts(ctx context.Context, req *model.A2ARequest) [
 	budgetCtx, cancelBudget := context.WithTimeout(ctx, attachmentsTotalTimeFactor*perDownload)
 	defer cancelBudget()
 
+	// Built once per turn, not per attachment: it carries the authorized hosts into
+	// the redirect check, so a 302 off the CRM cannot walk the download onto an
+	// internal address.
+	hosts := allowedMediaHosts(req.PostbackURL)
+	client := a.mediaClient(hosts)
+
 	parts := make([]model.JSONRPCPart, 0, len(req.Attachments))
 	remaining := maxAttachmentsTotalBytes
 	for i, att := range req.Attachments {
 		if att.URL == "" {
+			continue
+		}
+		if err := checkMediaURL(att.URL, hosts); err != nil {
+			slog.Warn("pipeline.ai.attachment.blocked_url",
+				"contact_id", req.ContactID,
+				"conversation_id", req.ConversationID,
+				"file_type", att.FileType,
+				"error", err,
+				"hint", "set "+mediaHostAllowlistEnv+" when blobs are served off the CRM host",
+			)
 			continue
 		}
 		if budgetCtx.Err() != nil {
@@ -360,12 +394,18 @@ func (a *aiAdapter) buildFileParts(ctx context.Context, req *model.A2ARequest) [
 			)
 			break
 		}
-		data, respContentType, err := a.downloadAttachment(budgetCtx, att.URL, perDownload, limit)
+		data, respContentType, err := downloadAttachment(budgetCtx, client, att.URL, perDownload, limit)
 		if err != nil {
+			// The status is logged separately because the most common production
+			// failure is a 404 from an expired signed link (the CRM mints it with a
+			// 15-minute TTL at delegation time, and a backed-up queue can outlive
+			// that). Without it "download_failed" reads the same as an unreachable
+			// host, and the customer just sees the agent ignore the image.
 			slog.Warn("pipeline.ai.attachment.download_failed",
 				"contact_id", req.ContactID,
 				"conversation_id", req.ConversationID,
 				"file_type", att.FileType,
+				"status", statusOf(err),
 				"error", err,
 			)
 			continue
@@ -412,10 +452,83 @@ func (a *aiAdapter) attachmentTimeout() time.Duration {
 	return d
 }
 
-// downloadAttachment GETs the URL with the adapter's client and the given timeout,
-// reading at most limit bytes. It returns the body and the response Content-Type so
-// the caller can decide what the bytes actually are.
-func (a *aiAdapter) downloadAttachment(ctx context.Context, url string, timeout time.Duration, limit int) ([]byte, string, error) {
+// allowedMediaHosts returns the hostnames authorized to serve this event's media:
+// the host of the event's own postback URL, plus whatever mediaHostAllowlistEnv
+// names. An empty set means nothing is authorized and every attachment is skipped —
+// failing closed is deliberate, because the alternative is fetching an
+// attacker-chosen URL from inside the network.
+func allowedMediaHosts(postbackURL string) map[string]struct{} {
+	hosts := make(map[string]struct{}, 2)
+	if u, err := neturl.Parse(postbackURL); err == nil {
+		if h := strings.ToLower(u.Hostname()); h != "" {
+			hosts[h] = struct{}{}
+		}
+	}
+	for _, h := range strings.Split(os.Getenv(mediaHostAllowlistEnv), ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			hosts[h] = struct{}{}
+		}
+	}
+	return hosts
+}
+
+// checkMediaURL reports why a media URL must not be fetched, or nil when it may be.
+// Scheme is pinned to http/https so the URL cannot address another protocol handler,
+// and the host must be one the CRM is known to serve blobs from.
+func checkMediaURL(rawURL string, hosts map[string]struct{}) error {
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("unparseable media url: %w", err)
+	}
+	if scheme := strings.ToLower(u.Scheme); scheme != "http" && scheme != "https" {
+		return fmt.Errorf("scheme %q is not allowed for media", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return errors.New("media url has no host")
+	}
+	if _, ok := hosts[host]; !ok {
+		return fmt.Errorf("host %q is not authorized to serve media for this event", host)
+	}
+	return nil
+}
+
+// mediaClient is the client used for attachment downloads. It shares the adapter's
+// transport (connection pool) but re-runs checkMediaURL on every redirect hop: an
+// allowlisted host that answers 302 must not be able to walk the download onto a
+// link-local or internal address.
+func (a *aiAdapter) mediaClient(hosts map[string]struct{}) *http.Client {
+	return &http.Client{
+		Transport: a.client.Transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return checkMediaURL(req.URL.String(), hosts)
+		},
+	}
+}
+
+// httpStatusError carries the status of a non-200 media response so the caller can
+// log it without re-parsing the message.
+type httpStatusError struct{ status int }
+
+func (e *httpStatusError) Error() string { return fmt.Sprintf("unexpected status %d", e.status) }
+
+// statusOf extracts the HTTP status from a download error, or 0 when the request
+// never got a response (DNS failure, refused connection, timeout, blocked redirect).
+func statusOf(err error) int {
+	var se *httpStatusError
+	if errors.As(err, &se) {
+		return se.status
+	}
+	return 0
+}
+
+// downloadAttachment GETs the URL with the given client and timeout, reading at most
+// limit bytes. It returns the body and the response Content-Type so the caller can
+// decide what the bytes actually are.
+func downloadAttachment(ctx context.Context, client *http.Client, url string, timeout time.Duration, limit int) ([]byte, string, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -423,13 +536,13 @@ func (a *aiAdapter) downloadAttachment(ctx context.Context, url string, timeout 
 	if err != nil {
 		return nil, "", fmt.Errorf("new_request: %w", err)
 	}
-	resp, err := a.client.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, "", fmt.Errorf("do: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("unexpected status %d", resp.StatusCode)
+		return nil, "", &httpStatusError{status: resp.StatusCode}
 	}
 	// +1 so an exactly-at-cap read is distinguishable from an oversize one.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
