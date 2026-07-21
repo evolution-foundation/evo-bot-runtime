@@ -86,10 +86,7 @@ func (r *redisPipelineRepository) AppendAttachments(ctx context.Context, contact
 	if err := r.rdb.RPush(ctx, key, values...).Err(); err != nil {
 		return err
 	}
-	// ClearState is the normal cleanup, but any turn that dies without reaching it
-	// (panic, killed pod, a Redis blip on the Del) would otherwise leave this key —
-	// and the media URLs in it — in Redis forever. The TTL is a floor, not the
-	// debounce window: it only has to outlive the longest possible turn.
+	// Leak backstop for turns that die before ClearState; not the debounce window.
 	return r.rdb.Expire(ctx, key, attachBufferTTL).Err()
 }
 
@@ -183,10 +180,8 @@ func bufferKey(contactID, conversationID int64) string {
 	return fmt.Sprintf("bot_runtime:buffer:%d:%d", contactID, conversationID)
 }
 
-// attachBufferTTL bounds how long an orphaned media buffer can survive. It is far
-// longer than any debounce window on purpose — it is a leak backstop, not a
-// deadline — and shorter than the 15-minute TTL the CRM signs the media URLs with,
-// so an entry can never outlive the links it holds.
+// attachBufferTTL outlives any turn but stays under the 15-minute TTL the CRM signs
+// the media URLs with, so an orphaned entry never outlives its links.
 const attachBufferTTL = 10 * time.Minute
 
 func attachBufferKey(contactID, conversationID int64) string {

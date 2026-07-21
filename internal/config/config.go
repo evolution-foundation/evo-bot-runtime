@@ -27,11 +27,8 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Required, not optional: SecretMiddleware compares the header against this
-	// value, so an empty secret authenticates every caller that simply omits the
-	// header. /events accepts an outgoing_url and (since EVO-2180) attachment URLs
-	// this service fetches itself, which makes an unauthenticated endpoint an
-	// outbound-request gadget rather than just a spam vector.
+	// Required: SecretMiddleware compares the header against this, so an empty value
+	// authenticates every caller that omits it.
 	botRuntimeSecret, err := mustGetEnv("BOT_RUNTIME_SECRET")
 	if err != nil {
 		return nil, err

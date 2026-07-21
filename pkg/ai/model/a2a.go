@@ -10,9 +10,8 @@ type A2ARequest struct {
 	Message        string         // aggregated buffer content (FR-15)
 	Metadata       map[string]any // CRM metadata passed through to processor (tools context)
 	Attachments    []Attachment   // EVO-2180: incoming media to forward as A2A file parts
-	// PostbackURL is the CRM base this event came from. It is not used for the A2A
-	// call itself — it anchors the host allowlist that decides which attachment URLs
-	// may be downloaded (see allowedMediaHosts).
+	// PostbackURL anchors the media host allowlist (see allowedMediaHosts); it is
+	// not used for the A2A call itself.
 	PostbackURL string
 }
 

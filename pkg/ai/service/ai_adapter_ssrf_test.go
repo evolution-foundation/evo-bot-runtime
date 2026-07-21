@@ -1,9 +1,7 @@
 package service_test
 
 // The attachment URL and the outgoing_url arrive in the same /events payload, so an
-// unvalidated download is not "a fetch that might fail" — it is a read primitive
-// aimed by the caller whose response is delivered back to the caller. These tests
-// pin the guard that keeps the fetch on hosts the CRM is known to serve blobs from.
+// unvalidated download is a read primitive aimed by its caller. These pin the guard.
 
 import (
 	"context"
@@ -18,8 +16,7 @@ import (
 	aiService "github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/service"
 )
 
-// capturingProc records the parts the adapter posts and answers with a minimal
-// successful A2A response.
+// capturingProc records the parts the adapter posts.
 func capturingProc(parts *[]aiModel.JSONRPCPart) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req aiModel.JSONRPCRequest
@@ -43,8 +40,7 @@ func fileParts(parts []aiModel.JSONRPCPart) []aiModel.JSONRPCPart {
 	return out
 }
 
-// The exfiltration shape: an attachment URL pointing at an internal service, and an
-// outgoing_url pointing at the attacker. Nothing internal may reach the file parts.
+// The exfiltration shape: internal attachment URL, attacker-chosen outgoing_url.
 func TestCall_ForeignHostAttachment_IsNotFetched(t *testing.T) {
 	var reached bool
 	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -79,8 +75,7 @@ func TestCall_ForeignHostAttachment_IsNotFetched(t *testing.T) {
 	}
 }
 
-// A host allowlisted through MEDIA_HOST_ALLOWLIST must still be reachable: blob
-// storage does not always live on the CRM host (ActiveStorage redirect mode, CDN).
+// Blob storage does not always live on the CRM host, so the allowlist must work.
 func TestCall_AllowlistedHost_IsFetched(t *testing.T) {
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
@@ -112,8 +107,7 @@ func TestCall_AllowlistedHost_IsFetched(t *testing.T) {
 	}
 }
 
-// A host check on the declared URL alone is not enough: an authorized host that
-// answers 302 could otherwise walk the download onto an internal address.
+// Checking the declared URL alone is not enough: a 302 could walk it internal.
 func TestCall_RedirectOffTheAuthorizedHost_IsRefused(t *testing.T) {
 	var reached bool
 	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,9 +116,8 @@ func TestCall_RedirectOffTheAuthorizedHost_IsRefused(t *testing.T) {
 	}))
 	defer internal.Close()
 
-	// httptest always binds 127.0.0.1, so the redirect target is addressed by a
-	// hostname the allowlist does not carry ("localhost") — same machine, different
-	// host string. Without the redirect check the fetch would succeed.
+	// httptest always binds 127.0.0.1, so the target uses a host string the
+	// allowlist does not carry. Without the redirect check this would succeed.
 	target := strings.Replace(internal.URL, "127.0.0.1", "localhost", 1)
 	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target+"/secret", http.StatusFound)
@@ -153,8 +146,7 @@ func TestCall_RedirectOffTheAuthorizedHost_IsRefused(t *testing.T) {
 	}
 }
 
-// Only http/https may be addressed: the URL must not be able to reach another
-// protocol handler.
+// Only http/https may be addressed.
 func TestCall_NonHTTPScheme_IsRejected(t *testing.T) {
 	var parts []aiModel.JSONRPCPart
 	proc := capturingProc(&parts)
@@ -173,9 +165,7 @@ func TestCall_NonHTTPScheme_IsRejected(t *testing.T) {
 	}
 }
 
-// With no postback URL and no allowlist nothing is authorized, so nothing is
-// fetched. Failing closed is the point: the alternative is fetching whatever the
-// payload asks for.
+// Nothing authorized means nothing fetched — failing closed is the point.
 func TestCall_NoAuthorizedHost_ForwardsNothing(t *testing.T) {
 	var reached bool
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

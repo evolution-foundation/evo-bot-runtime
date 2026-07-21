@@ -50,21 +50,9 @@ const (
 	attachmentsTotalTimeFactor = 3
 )
 
-// mediaHostAllowlistEnv names the extra hosts authorized to serve incoming media.
-//
-// Attachment URLs arrive inside the /events payload and downloading one is a request
-// this service makes from inside the network, so an unvalidated URL turns /events
-// into an SSRF gadget: the fetched bytes are handed straight to the outgoing_url
-// that came in the same payload. The media is served by the CRM that sent the event,
-// so the postback host — already mandatory in MessageEvent.Validate — is the natural
-// anchor and needs no new configuration.
-//
-// This variable is the escape hatch for deployments that serve blobs from somewhere
-// else: ActiveStorage in redirect mode (ATTACHMENT_DELIVERY=redirect) hands out
-// presigned S3/MinIO links, and a CDN in front of the CRM is the other common case.
-// Comma-separated hostnames, no scheme and no port, e.g.
-// "minio.internal,cdn.example.com". An attachment on any other host is skipped with
-// a log line and the text reply still goes out.
+// mediaHostAllowlistEnv names extra hosts authorized to serve incoming media,
+// comma-separated, for deployments serving blobs off the CRM host (ActiveStorage
+// redirect mode, CDN). The default anchor is the event's own postback host.
 const mediaHostAllowlistEnv = "MEDIA_HOST_ALLOWLIST"
 
 // maxBackoff caps the exponential backoff between retries so a large
@@ -351,9 +339,7 @@ func (a *aiAdapter) buildFileParts(ctx context.Context, req *model.A2ARequest) [
 	budgetCtx, cancelBudget := context.WithTimeout(ctx, attachmentsTotalTimeFactor*perDownload)
 	defer cancelBudget()
 
-	// Built once per turn, not per attachment: it carries the authorized hosts into
-	// the redirect check, so a 302 off the CRM cannot walk the download onto an
-	// internal address.
+	// Built once per turn: the client closes over the authorized hosts.
 	hosts := allowedMediaHosts(req.PostbackURL)
 	client := a.mediaClient(hosts)
 
@@ -396,11 +382,8 @@ func (a *aiAdapter) buildFileParts(ctx context.Context, req *model.A2ARequest) [
 		}
 		data, respContentType, err := downloadAttachment(budgetCtx, client, att.URL, perDownload, limit)
 		if err != nil {
-			// The status is logged separately because the most common production
-			// failure is a 404 from an expired signed link (the CRM mints it with a
-			// 15-minute TTL at delegation time, and a backed-up queue can outlive
-			// that). Without it "download_failed" reads the same as an unreachable
-			// host, and the customer just sees the agent ignore the image.
+			// Status separates the common 404-from-an-expired-signed-link case from
+			// an unreachable host; they logged identically before.
 			slog.Warn("pipeline.ai.attachment.download_failed",
 				"contact_id", req.ContactID,
 				"conversation_id", req.ConversationID,
@@ -452,11 +435,9 @@ func (a *aiAdapter) attachmentTimeout() time.Duration {
 	return d
 }
 
-// allowedMediaHosts returns the hostnames authorized to serve this event's media:
-// the host of the event's own postback URL, plus whatever mediaHostAllowlistEnv
-// names. An empty set means nothing is authorized and every attachment is skipped —
-// failing closed is deliberate, because the alternative is fetching an
-// attacker-chosen URL from inside the network.
+// allowedMediaHosts returns the hostnames authorized to serve this event's media.
+// An empty set authorizes nothing: failing closed beats fetching a URL the caller
+// chose.
 func allowedMediaHosts(postbackURL string) map[string]struct{} {
 	hosts := make(map[string]struct{}, 2)
 	if u, err := neturl.Parse(postbackURL); err == nil {
@@ -473,8 +454,6 @@ func allowedMediaHosts(postbackURL string) map[string]struct{} {
 }
 
 // checkMediaURL reports why a media URL must not be fetched, or nil when it may be.
-// Scheme is pinned to http/https so the URL cannot address another protocol handler,
-// and the host must be one the CRM is known to serve blobs from.
 func checkMediaURL(rawURL string, hosts map[string]struct{}) error {
 	u, err := neturl.Parse(rawURL)
 	if err != nil {
@@ -493,10 +472,8 @@ func checkMediaURL(rawURL string, hosts map[string]struct{}) error {
 	return nil
 }
 
-// mediaClient is the client used for attachment downloads. It shares the adapter's
-// transport (connection pool) but re-runs checkMediaURL on every redirect hop: an
-// allowlisted host that answers 302 must not be able to walk the download onto a
-// link-local or internal address.
+// mediaClient shares the adapter's transport but re-runs checkMediaURL on every
+// redirect hop, so an authorized host cannot 302 the download onto an internal one.
 func (a *aiAdapter) mediaClient(hosts map[string]struct{}) *http.Client {
 	return &http.Client{
 		Transport: a.client.Transport,
@@ -509,14 +486,12 @@ func (a *aiAdapter) mediaClient(hosts map[string]struct{}) *http.Client {
 	}
 }
 
-// httpStatusError carries the status of a non-200 media response so the caller can
-// log it without re-parsing the message.
+// httpStatusError carries the status of a non-200 media response.
 type httpStatusError struct{ status int }
 
 func (e *httpStatusError) Error() string { return fmt.Sprintf("unexpected status %d", e.status) }
 
-// statusOf extracts the HTTP status from a download error, or 0 when the request
-// never got a response (DNS failure, refused connection, timeout, blocked redirect).
+// statusOf returns the HTTP status of a download error, or 0 if there was no response.
 func statusOf(err error) int {
 	var se *httpStatusError
 	if errors.As(err, &se) {
@@ -526,8 +501,7 @@ func statusOf(err error) int {
 }
 
 // downloadAttachment GETs the URL with the given client and timeout, reading at most
-// limit bytes. It returns the body and the response Content-Type so the caller can
-// decide what the bytes actually are.
+// limit bytes. It returns the body and the response Content-Type.
 func downloadAttachment(ctx context.Context, client *http.Client, url string, timeout time.Duration, limit int) ([]byte, string, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
