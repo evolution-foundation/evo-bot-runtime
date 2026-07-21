@@ -54,6 +54,7 @@ func TestCall_ForwardsAttachmentAsFilePart(t *testing.T) {
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL:    proc.URL + "/api/v1/a2a/agent-1",
+		PostbackURL:    proc.URL,
 		ContactID:      1,
 		ConversationID: 2,
 		ApiKey:         "k",
@@ -98,6 +99,7 @@ func TestCall_AttachmentDownloadFailure_SendsTextOnly(t *testing.T) {
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL:    proc.URL + "/api/v1/a2a/agent-1",
+		PostbackURL:    proc.URL,
 		ContactID:      1,
 		ConversationID: 2,
 		ApiKey:         "k",
@@ -159,7 +161,7 @@ func TestCall_TotalAttachmentBudget_DropsExcessAndStillSends(t *testing.T) {
 
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "album", Attachments: atts,
+		OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "album", Attachments: atts,
 	}); err != nil {
 		t.Fatalf("a media budget overflow must not error the call: %v", err)
 	}
@@ -195,7 +197,7 @@ func TestCall_AttachmentTimeBudget_IsBounded(t *testing.T) {
 	adapter := aiService.NewAIAdapter(1, 0, 1)
 	start := time.Now()
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi", Attachments: atts,
+		OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi", Attachments: atts,
 	}); err != nil {
 		t.Fatalf("unreachable media must not error the call: %v", err)
 	}
@@ -221,7 +223,7 @@ func TestCall_HTMLResponse_IsNotForwardedAsMedia(t *testing.T) {
 
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
+		OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
 		Attachments: []aiModel.Attachment{{URL: htmlSrv.URL + "/photo.jpg", ContentType: "image/jpeg", FileType: "image"}},
 	}); err != nil {
 		t.Fatalf("Call: %v", err)
@@ -260,7 +262,7 @@ func TestCall_MimeTypeResolution(t *testing.T) {
 
 			adapter := aiService.NewAIAdapter(30, 0, 1)
 			if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-				OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
+				OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
 				Attachments: []aiModel.Attachment{{URL: srv.URL + tc.urlPath, ContentType: tc.declared, FileType: "image"}},
 			}); err != nil {
 				t.Fatalf("Call: %v", err)
@@ -294,7 +296,7 @@ func TestCall_OversizeAttachment_SendsTextOnly(t *testing.T) {
 
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
+		OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
 		Attachments: []aiModel.Attachment{{URL: srv.URL + "/big.png", ContentType: "image/png", FileType: "image"}},
 	}); err != nil {
 		t.Fatalf("an oversize attachment must not error the call: %v", err)

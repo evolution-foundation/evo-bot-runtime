@@ -27,7 +27,12 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	botRuntimeSecret := os.Getenv("BOT_RUNTIME_SECRET")
+	// Required: SecretMiddleware compares the header against this, so an empty value
+	// authenticates every caller that omits it.
+	botRuntimeSecret, err := mustGetEnv("BOT_RUNTIME_SECRET")
+	if err != nil {
+		return nil, err
+	}
 	aiCallTimeout, err := getEnvIntOrDefault("AI_CALL_TIMEOUT_SECONDS", 30)
 	if err != nil {
 		return nil, err

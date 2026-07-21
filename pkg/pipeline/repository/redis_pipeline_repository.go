@@ -82,7 +82,12 @@ func (r *redisPipelineRepository) AppendAttachments(ctx context.Context, contact
 		}
 		values = append(values, b)
 	}
-	return r.rdb.RPush(ctx, attachBufferKey(contactID, conversationID), values...).Err()
+	key := attachBufferKey(contactID, conversationID)
+	if err := r.rdb.RPush(ctx, key, values...).Err(); err != nil {
+		return err
+	}
+	// Leak backstop for turns that die before ClearState; not the debounce window.
+	return r.rdb.Expire(ctx, key, attachBufferTTL).Err()
 }
 
 // GetAttachments returns the media aggregated during the debounce window. EVO-2180.
@@ -174,6 +179,10 @@ func stateKey(contactID, conversationID int64) string {
 func bufferKey(contactID, conversationID int64) string {
 	return fmt.Sprintf("bot_runtime:buffer:%d:%d", contactID, conversationID)
 }
+
+// attachBufferTTL outlives any turn but stays under the 15-minute TTL the CRM signs
+// the media URLs with, so an orphaned entry never outlives its links.
+const attachBufferTTL = 10 * time.Minute
 
 func attachBufferKey(contactID, conversationID int64) string {
 	return fmt.Sprintf("bot_runtime:attach:%d:%d", contactID, conversationID)
