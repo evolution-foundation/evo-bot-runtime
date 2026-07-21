@@ -398,7 +398,6 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 		Message:        buffer,
 		Metadata:       metadata,
 		Attachments:    aiAttachments,
-		PostbackURL:    postbackURL, // anchors the media host allowlist
 	})
 	if err != nil {
 		switch {

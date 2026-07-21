@@ -44,6 +44,11 @@ spec:
                 configMapKeyRef:
                   name: evo-bot-runtime-config
                   key: AI_CALL_TIMEOUT_SECONDS
+            - name: MEDIA_HOST_ALLOWLIST
+              valueFrom:
+                configMapKeyRef:
+                  name: evo-bot-runtime-config
+                  key: MEDIA_HOST_ALLOWLIST
             # Secrets
             - name: REDIS_URL
               valueFrom:

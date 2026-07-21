@@ -40,6 +40,7 @@ func procServer(t *testing.T, capture *[]aiModel.JSONRPCPart) *httptest.Server {
 }
 
 func TestCall_ForwardsAttachmentAsFilePart(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	imgBytes := []byte("\x89PNG\r\n-fake-image-bytes")
 	fileSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
@@ -54,7 +55,6 @@ func TestCall_ForwardsAttachmentAsFilePart(t *testing.T) {
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL:    proc.URL + "/api/v1/a2a/agent-1",
-		PostbackURL:    proc.URL,
 		ContactID:      1,
 		ConversationID: 2,
 		ApiKey:         "k",
@@ -92,6 +92,7 @@ func TestCall_ForwardsAttachmentAsFilePart(t *testing.T) {
 }
 
 func TestCall_AttachmentDownloadFailure_SendsTextOnly(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	var parts []aiModel.JSONRPCPart
 	proc := procServer(t, &parts)
 	defer proc.Close()
@@ -99,7 +100,6 @@ func TestCall_AttachmentDownloadFailure_SendsTextOnly(t *testing.T) {
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
 		OutgoingURL:    proc.URL + "/api/v1/a2a/agent-1",
-		PostbackURL:    proc.URL,
 		ContactID:      1,
 		ConversationID: 2,
 		ApiKey:         "k",
@@ -143,6 +143,7 @@ func filePartsOf(parts []aiModel.JSONRPCPart) []aiModel.JSONRPCPart {
 // gateway's client_max_body_size. Over budget the extra media is dropped and the
 // call still goes out.
 func TestCall_TotalAttachmentBudget_DropsExcessAndStillSends(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	var hits int32
 	chunk := make([]byte, 6<<20) // 6 MiB each: 4 of them exceed the 20 MiB budget
 	fileSrv := mediaServer("image/png", chunk, &hits)
@@ -161,7 +162,7 @@ func TestCall_TotalAttachmentBudget_DropsExcessAndStillSends(t *testing.T) {
 
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "album", Attachments: atts,
+		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "album", Attachments: atts,
 	}); err != nil {
 		t.Fatalf("a media budget overflow must not error the call: %v", err)
 	}
@@ -178,6 +179,7 @@ func TestCall_TotalAttachmentBudget_DropsExcessAndStillSends(t *testing.T) {
 // An unreachable media host must not hold the turn hostage: the whole set shares a
 // time budget, so latency stays bounded no matter how many attachments arrive.
 func TestCall_AttachmentTimeBudget_IsBounded(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
@@ -197,7 +199,7 @@ func TestCall_AttachmentTimeBudget_IsBounded(t *testing.T) {
 	adapter := aiService.NewAIAdapter(1, 0, 1)
 	start := time.Now()
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi", Attachments: atts,
+		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi", Attachments: atts,
 	}); err != nil {
 		t.Fatalf("unreachable media must not error the call: %v", err)
 	}
@@ -213,6 +215,7 @@ func TestCall_AttachmentTimeBudget_IsBounded(t *testing.T) {
 // A Rails proxy URL that answers 200 with an error/login page must not be
 // forwarded as an image: the processor passes the mime straight into the model call.
 func TestCall_HTMLResponse_IsNotForwardedAsMedia(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	var hits int32
 	htmlSrv := mediaServer("text/html; charset=utf-8", []byte("<html>login</html>"), &hits)
 	defer htmlSrv.Close()
@@ -223,7 +226,7 @@ func TestCall_HTMLResponse_IsNotForwardedAsMedia(t *testing.T) {
 
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
+		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
 		Attachments: []aiModel.Attachment{{URL: htmlSrv.URL + "/photo.jpg", ContentType: "image/jpeg", FileType: "image"}},
 	}); err != nil {
 		t.Fatalf("Call: %v", err)
@@ -238,6 +241,7 @@ func TestCall_HTMLResponse_IsNotForwardedAsMedia(t *testing.T) {
 // resolves to an opaque blob is dropped rather than sent as octet-stream, which the
 // model APIs reject.
 func TestCall_MimeTypeResolution(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	cases := []struct {
 		name            string
 		respContentType string
@@ -262,7 +266,7 @@ func TestCall_MimeTypeResolution(t *testing.T) {
 
 			adapter := aiService.NewAIAdapter(30, 0, 1)
 			if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-				OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
+				OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
 				Attachments: []aiModel.Attachment{{URL: srv.URL + tc.urlPath, ContentType: tc.declared, FileType: "image"}},
 			}); err != nil {
 				t.Fatalf("Call: %v", err)
@@ -286,6 +290,7 @@ func TestCall_MimeTypeResolution(t *testing.T) {
 
 // A single file over the per-attachment cap is skipped, and the text still goes out.
 func TestCall_OversizeAttachment_SendsTextOnly(t *testing.T) {
+	t.Setenv("MEDIA_HOST_ALLOWLIST", "127.0.0.1")
 	var hits int32
 	srv := mediaServer("image/png", make([]byte, (15<<20)+1), &hits)
 	defer srv.Close()
@@ -296,7 +301,7 @@ func TestCall_OversizeAttachment_SendsTextOnly(t *testing.T) {
 
 	adapter := aiService.NewAIAdapter(30, 0, 1)
 	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
-		OutgoingURL: proc.URL, PostbackURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
+		OutgoingURL: proc.URL, ContactID: 1, ConversationID: 2, Message: "hi",
 		Attachments: []aiModel.Attachment{{URL: srv.URL + "/big.png", ContentType: "image/png", FileType: "image"}},
 	}); err != nil {
 		t.Fatalf("an oversize attachment must not error the call: %v", err)
