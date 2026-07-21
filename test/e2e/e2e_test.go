@@ -219,8 +219,8 @@ func newHarness(t *testing.T) *harness {
 	rs := redsync.New(pool)
 	repo := repository.NewPipelineRepository(rdb, rs)
 	debounce := debounceService.NewDebounceEngine(repo)
-	ai := aiService.NewAIAdapter(aiSrv.URL, 10)
-	dispatch := dispatchService.NewDispatchEngine()
+	ai := aiService.NewAIAdapter(10, 0, 200)
+	dispatch := dispatchService.NewDispatchEngine(testSecret)
 	pipeline := pipelineService.NewPipelineService(repo, debounce, ai, dispatch)
 	if err := pipeline.Start(); err != nil {
 		t.Fatalf("pipeline.Start: %v", err)
@@ -274,6 +274,7 @@ func (h *harness) event(contactID, convID int64, content string, debounceTime in
 		MessageID:      "e2e-msg-1",
 		MessageContent: content,
 		PostbackURL:    h.pbServer.URL,
+		OutgoingURL:    h.aiServer.URL,
 		BotConfig:      model.BotConfig{DebounceTime: debounceTime},
 	}
 }
@@ -387,8 +388,8 @@ func TestE2E_AIInterruption(t *testing.T) {
 	contactID, convID := nextPair()
 
 	firstCallConnected := make(chan struct{}) // closed when mock server has event1's connection
-	unblockFirst := make(chan struct{})        // closed by test to release the blocking handler
-	firstCallExited := make(chan struct{})     // closed when the blocking handler goroutine exits
+	unblockFirst := make(chan struct{})       // closed by test to release the blocking handler
+	firstCallExited := make(chan struct{})    // closed when the blocking handler goroutine exits
 
 	// Always unblock the handler on cleanup to prevent httptest.Server.Close() from
 	// waiting indefinitely for the active connection to finish.
@@ -564,9 +565,18 @@ func TestE2E_PipelineIsolation(t *testing.T) {
 		t.Errorf("postback content = %q, want %q", got, "pair-b response")
 	}
 
-	// Pair A must leave no state in Redis after its AI error.
+	// Pair A must leave no state in Redis after its AI error. Its cleanup runs in
+	// its own goroutine, so poll instead of racing pair B's postback.
 	stateKey := fmt.Sprintf("bot_runtime:state:%d:%d", pairAContact, pairAConv)
-	if n := h.rdb.Exists(context.Background(), stateKey).Val(); n != 0 {
+	cleared := false
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if h.rdb.Exists(context.Background(), stateKey).Val() == 0 {
+			cleared = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !cleared {
 		t.Errorf("pair A state key still exists in Redis after AI error — state leak")
 	}
 }
@@ -611,7 +621,8 @@ func TestE2E_DispatchSegmentation(t *testing.T) {
 		t.Fatalf("postback called %d times, want 3 (one per segment)", n)
 	}
 
-	want := []string{"hello", "world foo", "bar [sig]"}
+	// EVO-558: the signature is prepended to the first segment only.
+	want := []string{" [sig]hello", "world foo", "bar"}
 	for i, body := range h.pbServer.allBodies() {
 		got := decodePostbackContent(body)
 		if got != want[i] {
@@ -709,8 +720,8 @@ func TestE2E_RecoveryAfterRestart(t *testing.T) {
 	rs := redsync.New(pool)
 	repo := repository.NewPipelineRepository(rdb, rs)
 	debounce := debounceService.NewDebounceEngine(repo)
-	ai := aiService.NewAIAdapter(aiSrv.URL, 10)
-	dispatch := dispatchService.NewDispatchEngine()
+	ai := aiService.NewAIAdapter(10, 0, 200)
+	dispatch := dispatchService.NewDispatchEngine(testSecret)
 
 	aiSrv.setHandler(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

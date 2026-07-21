@@ -229,11 +229,16 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 		return fmt.Errorf("pipeline.skip_debounce.get_buffer: %w", err)
 	}
 
+	// A media read failure must never cost the customer the text reply (EVO-2180):
+	// log it and go on with no attachments.
 	atts, err := s.debounce.GetAttachments(ctx, event.ContactID, event.ConversationID)
 	if err != nil {
-		cancel()
-		s.entries.Delete(key)
-		return fmt.Errorf("pipeline.skip_debounce.get_attachments: %w", err)
+		slog.Warn("pipeline.skip_debounce.get_attachments_failed",
+			"contact_id", event.ContactID,
+			"conversation_id", event.ConversationID,
+			"error", err,
+		)
+		atts = nil
 	}
 
 	newState := &model.PipelineState{Stage: model.StageAI, CreatedAt: time.Now()}
@@ -296,14 +301,16 @@ func (s *pipelineService) advanceToAI(contactID, conversationID int64) {
 		return
 	}
 
+	// Media is best-effort: a failure here must not drop the turn's text reply
+	// (EVO-2180).
 	atts, err := s.debounce.GetAttachments(ctx, contactID, conversationID)
 	if err != nil {
-		slog.Error("pipeline.debounce.get_attachments_failed",
+		slog.Warn("pipeline.debounce.get_attachments_failed",
 			"contact_id", contactID,
 			"conversation_id", conversationID,
 			"error", err,
 		)
-		return
+		atts = nil
 	}
 
 	newState := &model.PipelineState{Stage: model.StageAI, CreatedAt: time.Now()}
