@@ -45,6 +45,7 @@ type MessageEvent struct {
 	ContactID      int64          `json:"contact_id"`
 	MessageID      string         `json:"message_id"`
 	MessageContent string         `json:"message_content"`
+	TranscribedText string        `json:"transcribed_text,omitempty"`
 	ApiKey         string         `json:"api_key"`
 	OutgoingURL    string         `json:"outgoing_url"`
 	BotConfig      BotConfig      `json:"bot_config"`

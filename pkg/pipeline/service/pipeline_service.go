@@ -114,6 +114,10 @@ func (s *pipelineService) Start() error {
 }
 
 func (s *pipelineService) Process(ctx context.Context, event *model.MessageEvent) error {
+	if event.TranscribedText != "" {
+		event.MessageContent = event.MessageContent + "\n\n[Transcrição do Áudio]:\n" + event.TranscribedText
+	}
+
 	mu, err := s.repo.AcquireLock(ctx, event.ContactID, event.ConversationID)
 	if err != nil {
 		return brtErrors.ErrLockFailed
