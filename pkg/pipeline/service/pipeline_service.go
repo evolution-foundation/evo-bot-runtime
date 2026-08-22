@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -415,6 +416,10 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 				"conversation_id", conversationID,
 			)
 			s.clearStateWithLog(contactID, conversationID)
+			// CRM-236: silence is indistinguishable from "the bot is ignoring you",
+			// and the tool's side effect may already be applied (the card moved at
+			// ~20s, the timeout fired at 30s). Tell the customer something.
+			s.sendAIFailureNotice(contactID, conversationID, cfg, postbackURL, err)
 		default:
 			slog.Error("pipeline.ai.error",
 				"contact_id", contactID,
@@ -422,6 +427,7 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 				"error", fmt.Errorf("pipeline.ai: %w", err),
 			)
 			s.clearStateWithLog(contactID, conversationID)
+			s.sendAIFailureNotice(contactID, conversationID, cfg, postbackURL, err)
 		}
 		return
 	}
@@ -641,6 +647,76 @@ func (s *pipelineService) recoverPipeline(contactID, conversationID int64) {
 // or after a failure. Prevents these calls from hanging indefinitely.
 func cleanupCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
+}
+
+// aiFailureNoticeEnv overrides the message the customer receives when the AI
+// backend times out or errors. Empty string disables the notice entirely, for
+// operators who prefer silence to a canned reply.
+const aiFailureNoticeEnv = "AI_FAILURE_NOTICE"
+
+// English: the runtime ships worldwide and a pt-BR default reached installs that
+// never chose it. Operators localise it with AI_FAILURE_NOTICE.
+const defaultAIFailureNotice = "We are having a temporary issue and could not answer right now. We will get back to you shortly."
+
+// sendAIFailureNotice replaces the silent turn with one sentence to the customer.
+// The provider's raw error goes to the operator's log, never to the chat.
+func (s *pipelineService) sendAIFailureNotice(
+	contactID, conversationID int64,
+	cfg model.BotConfig,
+	postbackURL string,
+	cause error,
+) {
+	notice := defaultAIFailureNotice
+	if v, ok := os.LookupEnv(aiFailureNoticeEnv); ok {
+		if strings.TrimSpace(v) == "" {
+			slog.Info("pipeline.ai.failure_notice.disabled",
+				"contact_id", contactID,
+				"conversation_id", conversationID,
+			)
+			return
+		}
+		notice = v
+	}
+
+	if postbackURL == "" {
+		slog.Warn("pipeline.ai.failure_notice.no_postback",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+		)
+		return
+	}
+
+	slog.Warn("pipeline.ai.failure_notice.sending",
+		"contact_id", contactID,
+		"conversation_id", conversationID,
+		"cause", cause.Error(),
+	)
+
+	// Dispatch directly: runDispatchStage ends in entries.Delete(pairKey), which
+	// would orphan a follow-up turn. Both callers already cleared the state.
+	ctx, cancel := noticeCtx()
+	defer cancel()
+	defer s.recoverPipeline(contactID, conversationID)
+
+	if err := s.dispatchEng.Dispatch(ctx, contactID, conversationID, notice, cfg, postbackURL); err != nil {
+		slog.Warn("pipeline.ai.failure_notice.failed",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+			"error", err,
+		)
+		return
+	}
+
+	slog.Info("pipeline.ai.failure_notice.sent",
+		"contact_id", contactID,
+		"conversation_id", conversationID,
+	)
+}
+
+// noticeCtx bounds the notice's dispatch. Not cleanupCtx: a Dispatch segments the
+// text and sleeps per rune between parts, which overruns its 5s.
+func noticeCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 30*time.Second)
 }
 
 // clearStateWithLog calls ClearState and logs a warning if it fails.

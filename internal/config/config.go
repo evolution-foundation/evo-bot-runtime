@@ -33,7 +33,9 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	aiCallTimeout, err := getEnvIntOrDefault("AI_CALL_TIMEOUT_SECONDS", 30)
+	// CRM-236: 90s, not 30. A tool-calling turn makes two model calls and the
+	// provider's tail alone measured 20.4s on a trivial prompt.
+	aiCallTimeout, err := getEnvIntOrDefault("AI_CALL_TIMEOUT_SECONDS", 90)
 	if err != nil {
 		return nil, err
 	}
