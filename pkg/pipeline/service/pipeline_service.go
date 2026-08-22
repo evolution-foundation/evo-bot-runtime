@@ -654,23 +654,12 @@ func cleanupCtx() (context.Context, context.CancelFunc) {
 // operators who prefer silence to a canned reply.
 const aiFailureNoticeEnv = "AI_FAILURE_NOTICE"
 
-// English by default: bot-runtime ships in community/self-hosted installs
-// worldwide, and a hardcoded pt-BR sentence reached customers of installations
-// that never chose Portuguese. Operators localise it with AI_FAILURE_NOTICE
-// (documented in .env.example), and an empty value restores the old silence.
+// English: the runtime ships worldwide and a pt-BR default reached installs that
+// never chose it. Operators localise it with AI_FAILURE_NOTICE.
 const defaultAIFailureNotice = "We are having a temporary issue and could not answer right now. We will get back to you shortly."
 
-// sendAIFailureNotice tells the customer something went wrong instead of leaving
-// the turn silent.
-//
-// CRM-236: when the provider degrades (429 quota, 503 high demand, or a slow
-// tail) the turn exceeds the ceiling and the pipeline used to just log and clear
-// state. Nothing reached the chat, so the customer could not tell the difference
-// between a broken bot and one ignoring them — and the tool's side effect may
-// ALREADY be applied (the pipeline card moves at ~20s, the timeout fires later).
-//
-// The reason is logged for the operator; the customer gets a plain sentence,
-// never the provider's raw error (it carries model names, quotas and URLs).
+// sendAIFailureNotice replaces the silent turn with one sentence to the customer.
+// The provider's raw error goes to the operator's log, never to the chat.
 func (s *pipelineService) sendAIFailureNotice(
 	contactID, conversationID int64,
 	cfg model.BotConfig,
@@ -703,24 +692,8 @@ func (s *pipelineService) sendAIFailureNotice(
 		"cause", cause.Error(),
 	)
 
-	// Dispatch DIRECTLY — never through runDispatchStage.
-	//
-	// CRM-236 review: runDispatchStage owns the turn's bookkeeping. Its success
-	// path runs SetState(StageDone) → ClearState → entries.Delete(pairKey), and
-	// its own comments (see the ErrDispatchInterrupted branch above) spell out
-	// why that Delete must not run here: "A Delete here would race with the new
-	// event's Store and could delete the replacement entry."
-	//
-	// The race is not hypothetical, and it lands on the very scenario this
-	// feature targets — the customer who waited and follows up. They send "oi?"
-	// while the notice is being dispatched, startDebounce does entries.Store for
-	// the new turn, then the notice finishes and deletes THAT entry and clears
-	// its state. The new turn is orphaned: the next message cannot cancel it, so
-	// two pipelines run concurrently on the same pair and the customer gets a
-	// duplicated reply.
-	//
-	// There is nothing to book-keep here anyway: both callers already ran
-	// clearStateWithLog before reaching this function.
+	// Dispatch directly: runDispatchStage ends in entries.Delete(pairKey), which
+	// would orphan a follow-up turn. Both callers already cleared the state.
 	ctx, cancel := noticeCtx()
 	defer cancel()
 	defer s.recoverPipeline(contactID, conversationID)
@@ -740,16 +713,8 @@ func (s *pipelineService) sendAIFailureNotice(
 	)
 }
 
-// noticeCtx bounds the failure notice's dispatch.
-//
-// NOT cleanupCtx(): those 5s are documented for cleanup calls (ClearState,
-// SetState), and a Dispatch is a different animal — it segments the text by
-// TextSegmentationLimit and sleeps DelayPerCharacter per rune between parts
-// (dispatch_engine.go). With segmentation on, the 84-rune default notice
-// becomes 2-3 parts and the delays alone exceed 5s, so the dispatch was being
-// interrupted mid-way. Worse, the old path then logged
-// "pipeline.dispatch.cancelled — New message arrived" when no message had
-// arrived at all: the operator was told the wrong reason.
+// noticeCtx bounds the notice's dispatch. Not cleanupCtx: a Dispatch segments the
+// text and sleeps per rune between parts, which overruns its 5s.
 func noticeCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 30*time.Second)
 }

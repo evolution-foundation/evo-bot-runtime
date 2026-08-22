@@ -12,12 +12,8 @@ import (
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 )
 
-// CRM-236: when the LLM provider degrades (429 quota, 503 high demand, or just a
-// slow tail) the turn exceeds the ceiling. The pipeline used to only log and
-// clear state, so NOTHING reached the chat — indistinguishable, for the
-// customer, from a bot that is ignoring them. Worse, the tool's side effect may
-// already be applied: the pipeline card moves at ~20s and the timeout fires
-// later, so the funnel advances while the conversation stays silent.
+// CRM-236: a degraded provider used to end the turn in silence, while the tool's
+// side effect (a moved pipeline card) had already been applied.
 
 func captureDispatch(t *testing.T) (*mockDispatchEngine, *[]string) {
 	t.Helper()
@@ -140,11 +136,8 @@ func TestAIFailureNotice_DoesNotWriteTurnState(t *testing.T) {
 	}
 }
 
-// The entry, not just the state: entries.Delete(pairKey) was the half of
-// runDispatchStage's bookkeeping that did the real damage. The customer who
-// waited follows up mid-dispatch, startDebounce stores a NEW entry under the
-// same key, and deleting it orphans that turn — the next message can no longer
-// cancel it, so two pipelines answer the same pair.
+// The entry, not just the state: entries.Delete(pairKey) orphaned the follow-up
+// turn, so the message after it started a second concurrent pipeline.
 func TestAIFailureNotice_DoesNotTouchTheEntryOfTheNextTurn(t *testing.T) {
 	engine, sent := captureDispatch(t)
 	svc, _ := setupSvcWithAIAndDispatch(t, &mockAIAdapter{}, engine)

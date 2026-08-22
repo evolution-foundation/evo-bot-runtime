@@ -5,9 +5,8 @@ metadata:
 data:
   LISTEN_ADDR: ":8080"
   AI_PROCESSOR_URL: "http://ai-processor:8000"
-  # CRM-236: an explicit value OVERRIDES the code default, so pinning 30 here kept
-  # the raised ceiling from taking effect - and this ConfigMap is what actually
-  # runs in staging/production.
+  # CRM-236: an explicit value overrides the code default, and this ConfigMap is
+  # what runs in staging/production.
   AI_CALL_TIMEOUT_SECONDS: "90"
   # Hosts allowed to serve incoming media, comma-separated (no scheme/port).
   # Must include the host of the CRM's BACKEND_URL, or no media reaches the agent.

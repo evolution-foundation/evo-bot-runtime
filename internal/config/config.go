@@ -33,17 +33,8 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// CRM-236: 30s was dimensioned for a single, well-behaved model call. Measured
-	// against gemini-2.5-flash, the SAME trivial prompt answered in
-	// 0.74s / 0.79s / 1.36s / 10.34s / 20.40s — a 27x spread on the provider's
-	// tail. A tool-calling turn makes at least TWO of those round trips (decide the
-	// tool, then write the reply), so two bad tails alone exceed 30s with nothing
-	// wrong in the code — and the customer got silence while the tool's side effect
-	// (a moved pipeline card) had already been applied.
-	//
-	// 90s covers two tail-latency calls plus the CRM round trip, and still bounds a
-	// genuinely hung provider. It is not a licence to hang: the fallback message
-	// below is what protects the customer when the ceiling IS reached.
+	// CRM-236: 90s, not 30. A tool-calling turn makes two model calls and the
+	// provider's tail alone measured 20.4s on a trivial prompt.
 	aiCallTimeout, err := getEnvIntOrDefault("AI_CALL_TIMEOUT_SECONDS", 90)
 	if err != nil {
 		return nil, err
