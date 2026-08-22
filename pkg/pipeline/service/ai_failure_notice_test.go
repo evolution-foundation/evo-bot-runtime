@@ -120,21 +120,75 @@ func TestAIFailureNotice_DefaultWhenEnvUnset(t *testing.T) {
 	}
 }
 
-
 func TestAIFailureNotice_DoesNotWriteTurnState(t *testing.T) {
 	engine, _ := captureDispatch(t)
-	svc, rdb := setupSvcWithAIAndDispatch(t, &mockAIAdapter{}, engine)
+	svc, _ := setupSvcWithAIAndDispatch(t, &mockAIAdapter{}, engine)
 
 	// The callers already cleared the state before asking for the notice; writing
 	// StageDone here would resurrect state for a turn that is over — and, in the
 	// follow-up race, stamp it over the NEW turn's state.
 	svc.sendAIFailureNotice(1, 2, model.BotConfig{}, "http://crm.test/postback/2", brtErrors.ErrAITimeout)
 
+	// A read error must fail the test, not pass it: GetState returns (nil, nil)
+	// for a missing key, so nil-with-error proves nothing about what was written.
 	state, err := svc.repo.GetState(context.Background(), 1, 2)
-	if err == nil && state != nil {
+	if err != nil {
+		t.Fatalf("could not read the state back: %v", err)
+	}
+	if state != nil {
 		t.Fatalf("the notice wrote turn state: stage=%v", state.Stage)
 	}
-	_ = rdb
+}
+
+// The entry, not just the state: entries.Delete(pairKey) was the half of
+// runDispatchStage's bookkeeping that did the real damage. The customer who
+// waited follows up mid-dispatch, startDebounce stores a NEW entry under the
+// same key, and deleting it orphans that turn — the next message can no longer
+// cancel it, so two pipelines answer the same pair.
+func TestAIFailureNotice_DoesNotTouchTheEntryOfTheNextTurn(t *testing.T) {
+	engine, sent := captureDispatch(t)
+	svc, _ := setupSvcWithAIAndDispatch(t, &mockAIAdapter{}, engine)
+
+	// The follow-up turn, exactly as startDebounce leaves it: an entry in the map
+	// and StageDebounce in Redis, both under the pair the notice is about to use.
+	key := pairKey(1, 2)
+	nextTurn, cancelNextTurn := context.WithCancel(context.Background())
+	defer cancelNextTurn()
+	svc.entries.Store(key, pipelineEntry{ctx: nextTurn, cancel: cancelNextTurn})
+	debounce := &model.PipelineState{Stage: model.StageDebounce, CreatedAt: time.Now()}
+	if err := svc.repo.SetState(context.Background(), 1, 2, debounce); err != nil {
+		t.Fatalf("could not seed the next turn's state: %v", err)
+	}
+	t.Cleanup(func() { svc.repo.ClearState(context.Background(), 1, 2) })
+
+	svc.sendAIFailureNotice(1, 2, model.BotConfig{}, "http://crm.test/postback/2", brtErrors.ErrAITimeout)
+
+	// Guard the guard: the bookkeeping only runs after a successful dispatch, so
+	// a notice that never went out would satisfy the assertions below for free.
+	if len(*sent) != 1 {
+		t.Fatalf("the notice never dispatched, so this proves nothing: %v", *sent)
+	}
+
+	stored, ok := svc.entries.Load(key)
+	if !ok {
+		t.Fatal("the notice deleted the next turn's entry: it can no longer be cancelled, so the message after it starts a second concurrent pipeline")
+	}
+	if entry, _ := stored.(pipelineEntry); entry.ctx != nextTurn {
+		t.Error("the next turn's entry was replaced by the notice")
+	}
+
+	// SetState(StageDone) followed by ClearState leaves nothing behind, so only a
+	// seeded state can witness it: the next turn must still be in StageDebounce.
+	state, err := svc.repo.GetState(context.Background(), 1, 2)
+	if err != nil {
+		t.Fatalf("could not read the next turn's state back: %v", err)
+	}
+	if state == nil {
+		t.Fatal("the notice cleared the next turn's state: its debounce is lost")
+	}
+	if state.Stage != model.StageDebounce {
+		t.Errorf("the notice stamped the next turn's state: stage=%v, want %v", state.Stage, model.StageDebounce)
+	}
 }
 
 // The notice is a real dispatch (segmented, with per-rune delays), not a cleanup
