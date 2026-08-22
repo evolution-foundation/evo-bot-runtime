@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -415,6 +416,10 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 				"conversation_id", conversationID,
 			)
 			s.clearStateWithLog(contactID, conversationID)
+			// CRM-236: silence is indistinguishable from "the bot is ignoring you",
+			// and the tool's side effect may already be applied (the card moved at
+			// ~20s, the timeout fired at 30s). Tell the customer something.
+			s.sendAIFailureNotice(contactID, conversationID, cfg, postbackURL, err)
 		default:
 			slog.Error("pipeline.ai.error",
 				"contact_id", contactID,
@@ -422,6 +427,7 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 				"error", fmt.Errorf("pipeline.ai: %w", err),
 			)
 			s.clearStateWithLog(contactID, conversationID)
+			s.sendAIFailureNotice(contactID, conversationID, cfg, postbackURL, err)
 		}
 		return
 	}
@@ -646,6 +652,62 @@ func cleanupCtx() (context.Context, context.CancelFunc) {
 // clearStateWithLog calls ClearState and logs a warning if it fails.
 // Used in all goroutine error/cleanup paths where the error is non-actionable
 // but should not be silently swallowed.
+// aiFailureNoticeEnv overrides the message the customer receives when the AI
+// backend times out or errors. Empty string disables the notice entirely, for
+// operators who prefer silence to a canned reply.
+const aiFailureNoticeEnv = "AI_FAILURE_NOTICE"
+
+const defaultAIFailureNotice = "Estou com uma instabilidade no momento e não consegui responder agora. Já retorno."
+
+// sendAIFailureNotice tells the customer something went wrong instead of leaving
+// the turn silent.
+//
+// CRM-236: when the provider degrades (429 quota, 503 high demand, or a slow
+// tail) the turn exceeds the ceiling and the pipeline used to just log and clear
+// state. Nothing reached the chat, so the customer could not tell the difference
+// between a broken bot and one ignoring them — and the tool's side effect may
+// ALREADY be applied (the pipeline card moves at ~20s, the timeout fires later).
+//
+// The reason is logged for the operator; the customer gets a plain sentence,
+// never the provider's raw error (it carries model names, quotas and URLs).
+func (s *pipelineService) sendAIFailureNotice(
+	contactID, conversationID int64,
+	cfg model.BotConfig,
+	postbackURL string,
+	cause error,
+) {
+	notice := defaultAIFailureNotice
+	if v, ok := os.LookupEnv(aiFailureNoticeEnv); ok {
+		if strings.TrimSpace(v) == "" {
+			slog.Info("pipeline.ai.failure_notice.disabled",
+				"contact_id", contactID,
+				"conversation_id", conversationID,
+			)
+			return
+		}
+		notice = v
+	}
+
+	if postbackURL == "" {
+		slog.Warn("pipeline.ai.failure_notice.no_postback",
+			"contact_id", contactID,
+			"conversation_id", conversationID,
+		)
+		return
+	}
+
+	slog.Warn("pipeline.ai.failure_notice.sending",
+		"contact_id", contactID,
+		"conversation_id", conversationID,
+		"cause", cause.Error(),
+	)
+
+	// Own context: the pipeline ctx is already cancelled or timed out by now.
+	ctx, cancel := cleanupCtx()
+	defer cancel()
+	s.runDispatchStage(ctx, contactID, conversationID, notice, cfg, postbackURL)
+}
+
 func (s *pipelineService) clearStateWithLog(contactID, conversationID int64) {
 	ctx, cancel := cleanupCtx()
 	defer cancel()
