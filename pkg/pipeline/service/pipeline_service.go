@@ -649,9 +649,6 @@ func cleanupCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
-// clearStateWithLog calls ClearState and logs a warning if it fails.
-// Used in all goroutine error/cleanup paths where the error is non-actionable
-// but should not be silently swallowed.
 // aiFailureNoticeEnv overrides the message the customer receives when the AI
 // backend times out or errors. Empty string disables the notice entirely, for
 // operators who prefer silence to a canned reply.
@@ -757,6 +754,9 @@ func noticeCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 30*time.Second)
 }
 
+// clearStateWithLog calls ClearState and logs a warning if it fails.
+// Used in all goroutine error/cleanup paths where the error is non-actionable
+// but should not be silently swallowed.
 func (s *pipelineService) clearStateWithLog(contactID, conversationID int64) {
 	ctx, cancel := cleanupCtx()
 	defer cancel()
