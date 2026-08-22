@@ -533,6 +533,12 @@ func TestE2E_ExactlyOnce_ConcurrentEvents(t *testing.T) {
 // The panic recovery path is unit-tested but no test has exercised two concurrent
 // live pipelines where one fails and the other must succeed.
 func TestE2E_PipelineIsolation(t *testing.T) {
+	// Pinned through the operator-facing env instead of reaching for the
+	// package constant: it keeps this test out of service's internals and
+	// exercises AI_FAILURE_NOTICE on the way.
+	const pairANotice = "pair-a failure notice"
+	t.Setenv("AI_FAILURE_NOTICE", pairANotice)
+
 	h := newHarness(t)
 	pairAContact, pairAConv := nextPair()
 	pairBContact, pairBConv := nextPair()
@@ -556,13 +562,36 @@ func TestE2E_PipelineIsolation(t *testing.T) {
 	h.postEvent(t, h.event(pairAContact, pairAConv, "pair-a", 0)).Body.Close()
 	h.postEvent(t, h.event(pairBContact, pairBConv, "pair-b", 0)).Body.Close()
 
-	h.pbServer.waitForCall(t, 3*time.Second)
+	// CRM-236 changed what pair A does on an AI error: it used to fail SILENTLY
+	// (log + clear state, nothing reaching the chat), and now it sends the
+	// customer a failure notice. So this pair delivers too, and the assertion
+	// "only pair B should deliver" no longer describes intended behaviour.
+	//
+	// What this test is actually about — isolation — is now checked more
+	// strictly than before: each pair must receive ITS OWN message, so a
+	// crossed delivery fails here even though the call count would be right.
+	h.pbServer.waitForNCalls(t, 2, 3*time.Second)
 
-	if n := h.pbServer.callCount(); n != 1 {
-		t.Errorf("postback called %d times, want 1 (only pair B should deliver)", n)
+	if n := h.pbServer.callCount(); n != 2 {
+		t.Errorf("postback called %d times, want 2 (pair B's answer + pair A's failure notice)", n)
 	}
-	if got := decodePostbackContent(h.pbServer.lastBody()); got != "pair-b response" {
-		t.Errorf("postback content = %q, want %q", got, "pair-b response")
+
+	var sawResponse, sawNotice bool
+	for _, body := range h.pbServer.allBodies() {
+		switch content := decodePostbackContent(body); content {
+		case "pair-b response":
+			sawResponse = true
+		case pairANotice:
+			sawNotice = true
+		default:
+			t.Errorf("unexpected postback content %q", content)
+		}
+	}
+	if !sawResponse {
+		t.Error("pair B's answer never arrived: pair A's AI error leaked into pair B")
+	}
+	if !sawNotice {
+		t.Error("pair A got no failure notice: its customer is left in silence (CRM-236)")
 	}
 
 	// Pair A must leave no state in Redis after its AI error. Its cleanup runs in
