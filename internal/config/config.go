@@ -11,6 +11,11 @@ type Config struct {
 	RedisURL             string
 	BotRuntimeSecret     string
 	AICallTimeoutSeconds int
+	// EVO-2167: retry the AI Processor call on transient failures (5xx/429/network)
+	// so a momentary blip (deploy, restart, DB hiccup) does not leave the customer
+	// without a reply. AICallMaxRetries is retries AFTER the first attempt.
+	AICallMaxRetries  int
+	AICallRetryBaseMs int
 }
 
 func Load() (*Config, error) {
@@ -22,8 +27,23 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	botRuntimeSecret := os.Getenv("BOT_RUNTIME_SECRET")
-	aiCallTimeout, err := getEnvIntOrDefault("AI_CALL_TIMEOUT_SECONDS", 30)
+	// Required: SecretMiddleware compares the header against this, so an empty value
+	// authenticates every caller that omits it.
+	botRuntimeSecret, err := mustGetEnv("BOT_RUNTIME_SECRET")
+	if err != nil {
+		return nil, err
+	}
+	// CRM-236: 90s, not 30. A tool-calling turn makes two model calls and the
+	// provider's tail alone measured 20.4s on a trivial prompt.
+	aiCallTimeout, err := getEnvIntOrDefault("AI_CALL_TIMEOUT_SECONDS", 90)
+	if err != nil {
+		return nil, err
+	}
+	aiCallMaxRetries, err := getEnvIntOrDefault("AI_CALL_MAX_RETRIES", 2)
+	if err != nil {
+		return nil, err
+	}
+	aiCallRetryBaseMs, err := getEnvIntOrDefault("AI_CALL_RETRY_BASE_MS", 200)
 	if err != nil {
 		return nil, err
 	}
@@ -33,6 +53,8 @@ func Load() (*Config, error) {
 		RedisURL:             redisURL,
 		BotRuntimeSecret:     botRuntimeSecret,
 		AICallTimeoutSeconds: aiCallTimeout,
+		AICallMaxRetries:     aiCallMaxRetries,
+		AICallRetryBaseMs:    aiCallRetryBaseMs,
 	}, nil
 }
 

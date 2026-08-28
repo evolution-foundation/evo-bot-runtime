@@ -27,14 +27,14 @@ type PairID struct {
 // BotConfig and PostbackURL are persisted for StageDebounce so that the service can
 // reconstruct the pipelineEntry correctly after a restart (NFR-01 recovery).
 type PipelineState struct {
-	Stage        Stage     `json:"stage"`
-	CreatedAt    time.Time `json:"created_at"`
-	BotConfig    BotConfig `json:"bot_config,omitempty"`
-	PostbackURL  string    `json:"postback_url,omitempty"`
-	AgentBotID   string    `json:"agent_bot_id,omitempty"`
-	ApiKey       string    `json:"api_key,omitempty"`
-	OutgoingURL  string         `json:"outgoing_url,omitempty"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	Stage       Stage          `json:"stage"`
+	CreatedAt   time.Time      `json:"created_at"`
+	BotConfig   BotConfig      `json:"bot_config,omitempty"`
+	PostbackURL string         `json:"postback_url,omitempty"`
+	AgentBotID  string         `json:"agent_bot_id,omitempty"`
+	ApiKey      string         `json:"api_key,omitempty"`
+	OutgoingURL string         `json:"outgoing_url,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 
 // MessageEvent is the inbound payload from evo-ai-crm AgentBotListener.
@@ -45,6 +45,7 @@ type MessageEvent struct {
 	ContactID      int64          `json:"contact_id"`
 	MessageID      string         `json:"message_id"`
 	MessageContent string         `json:"message_content"`
+	Attachments    []Attachment   `json:"attachments,omitempty"` // EVO-2180: incoming media (image/audio/…)
 	ApiKey         string         `json:"api_key"`
 	OutgoingURL    string         `json:"outgoing_url"`
 	BotConfig      BotConfig      `json:"bot_config"`
@@ -52,15 +53,24 @@ type MessageEvent struct {
 	Metadata       map[string]any `json:"metadata,omitempty"`
 }
 
+// Attachment is an incoming media item forwarded by the CRM. The AI adapter
+// downloads it and sends it to the AI Processor as a base64 A2A file part.
+// EVO-2180. JSON tags match the CRM DelegationService payload.
+type Attachment struct {
+	URL         string `json:"url"`
+	ContentType string `json:"content_type"`
+	FileType    string `json:"file_type"`
+}
+
 // BotConfig carries per-bot runtime configuration provided by the caller.
 // Bot Runtime must not make any outbound call to fetch config (FR-24).
 type BotConfig struct {
-	DebounceTime            int     `json:"debounce_time"`              // seconds; 0 = pass-through
+	DebounceTime            int     `json:"debounce_time"` // seconds; 0 = pass-through
 	MessageSignature        string  `json:"message_signature"`
 	TextSegmentationEnabled bool    `json:"text_segmentation_enabled"`
-	TextSegmentationLimit   int     `json:"text_segmentation_limit"`    // max chars per segment
+	TextSegmentationLimit   int     `json:"text_segmentation_limit"` // max chars per segment
 	TextSegmentationMinSize int     `json:"text_segmentation_min_size"`
-	DelayPerCharacter       float64 `json:"delay_per_character"`        // ms per char between parts
+	DelayPerCharacter       float64 `json:"delay_per_character"` // ms per char between parts
 }
 
 // Validate checks semantic constraints on a MessageEvent after JSON binding.

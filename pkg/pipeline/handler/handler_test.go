@@ -39,6 +39,12 @@ func (m *mockRepo) AppendToBuffer(_ context.Context, _, _ int64, _ string) error
 func (m *mockRepo) GetBuffer(_ context.Context, _, _ int64) ([]string, error) {
 	return nil, nil
 }
+func (m *mockRepo) AppendAttachments(_ context.Context, _, _ int64, _ []model.Attachment) error {
+	return nil
+}
+func (m *mockRepo) GetAttachments(_ context.Context, _, _ int64) ([]model.Attachment, error) {
+	return nil, nil
+}
 func (m *mockRepo) SetTimer(_ context.Context, _, _ int64, _ time.Duration) error { return nil }
 func (m *mockRepo) DeleteTimer(_ context.Context, _, _ int64) error               { return nil }
 func (m *mockRepo) TimerExists(_ context.Context, _, _ int64) (bool, error)       { return false, nil }
@@ -48,7 +54,7 @@ func (m *mockRepo) AcquireLock(_ context.Context, _, _ int64) (repository.Mutex,
 func (m *mockRepo) ScanStates(_ context.Context, _ int) ([]model.PairID, error) {
 	return nil, nil
 }
-func (m *mockRepo) Ping(_ context.Context) error                         { return m.pingErr }
+func (m *mockRepo) Ping(_ context.Context) error { return m.pingErr }
 
 // mockSvc satisfies pipelineService.PipelineService for handler tests.
 type mockSvc struct{ processErr error }
