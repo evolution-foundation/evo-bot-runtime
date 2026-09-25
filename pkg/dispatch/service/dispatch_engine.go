@@ -17,8 +17,10 @@ import (
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/pipeline/model"
 )
 
-// DispatchEngine segments the AI response, appends the message signature,
-// and sends each part sequentially via HTTP postback.
+// DispatchEngine segments the AI response and sends each part sequentially
+// via HTTP postback, unmodified — it does not apply BotConfig.MessageSignature
+// (the CRM applies the agent-bot display-name prefix centrally; see
+// dispatch_engine_test.go for the contract this must not regress).
 // Swap the dispatch backend by providing a different implementation at main.go wiring.
 type DispatchEngine interface {
 	Dispatch(

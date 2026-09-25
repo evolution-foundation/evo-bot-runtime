@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -67,13 +66,17 @@ func TestDispatch_MultiPart_SignatureNotAppliedByBotRuntime(t *testing.T) {
 	copy(parts, *partsPtr)
 	mu.Unlock()
 
-	if len(parts) <= 1 {
-		t.Fatalf("segmentation must produce multiple parts, got %d", len(parts))
+	// "hello world this is test" (limit 15) → ["hello world", "this is test"]
+	// (greedy word-packing; see segmentContent). Asserting the full parts,
+	// not just the signature's absence, so a future regression that drops or
+	// mangles segmented content can't hide behind a passing "no [bot]" check.
+	want := []string{"hello world", "this is test"}
+	if len(parts) != len(want) {
+		t.Fatalf("segmentation must produce %d parts, got %d: %q", len(want), len(parts), parts)
 	}
-
 	for i, p := range parts {
-		if strings.Contains(p, "[bot]") {
-			t.Errorf("MessageSignature must not be applied by bot_runtime, found it on part %d: %q", i, p)
+		if p != want[i] {
+			t.Errorf("part %d = %q, want %q (MessageSignature must not be applied by bot_runtime)", i, p, want[i])
 		}
 	}
 }
