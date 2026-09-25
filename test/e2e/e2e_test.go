@@ -612,8 +612,11 @@ func TestE2E_PipelineIsolation(t *testing.T) {
 
 // TestE2E_DispatchSegmentation verifies that BotConfig segmentation fields are
 // threaded correctly from the event through the pipeline to the dispatch engine,
-// and that the AI response is split into the expected parts with the signature
-// appended only to the last one.
+// and that the AI response is split into the expected parts. MessageSignature
+// is set on the event to prove bot_runtime does NOT act on it — the CRM applies
+// the agent-bot display-name prefix once, centrally, on every postback it
+// receives (see Message#apply_agent_bot_signature on the CRM side), so
+// bot_runtime must leave segment content untouched regardless of this field.
 //
 // dispatch_engine_test.go covers segmentation in isolation. This is the first
 // test to exercise the full chain: BotConfig in the HTTP event → pipelineEntry →
@@ -621,7 +624,6 @@ func TestE2E_PipelineIsolation(t *testing.T) {
 //
 // Content: "hello world foo bar", limit=10 chars per segment.
 // segmentContent produces ["hello", "world foo", "bar"].
-// With signature " [sig]" appended to the last part: "bar [sig]".
 func TestE2E_DispatchSegmentation(t *testing.T) {
 	h := newHarness(t)
 	contactID, convID := nextPair()
@@ -650,12 +652,11 @@ func TestE2E_DispatchSegmentation(t *testing.T) {
 		t.Fatalf("postback called %d times, want 3 (one per segment)", n)
 	}
 
-	// EVO-558: the signature is prepended to the first segment only.
-	want := []string{" [sig]hello", "world foo", "bar"}
+	want := []string{"hello", "world foo", "bar"}
 	for i, body := range h.pbServer.allBodies() {
 		got := decodePostbackContent(body)
 		if got != want[i] {
-			t.Errorf("segment[%d] = %q, want %q", i, got, want[i])
+			t.Errorf("segment[%d] = %q, want %q (MessageSignature must not be applied by bot_runtime)", i, got, want[i])
 		}
 	}
 }

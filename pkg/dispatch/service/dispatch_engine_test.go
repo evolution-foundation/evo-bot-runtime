@@ -39,7 +39,13 @@ func collectParts(t *testing.T) (*httptest.Server, *[]string, *sync.Mutex) {
 	return server, &parts, &mu
 }
 
-func TestDispatch_MultiPart_SignatureOnFirstOnly(t *testing.T) {
+// MessageSignature is no longer applied here: the CRM now prefixes the
+// agent-bot display name once, centrally, for every outgoing AgentBot
+// message (see Message#apply_agent_bot_signature on the CRM side) — doing
+// it here too would double-prefix it. BotConfig still carries the field
+// for callers that read it for other purposes, but Dispatch must leave
+// content untouched regardless of its value.
+func TestDispatch_MultiPart_SignatureNotAppliedByBotRuntime(t *testing.T) {
 	server, partsPtr, mu := collectParts(t)
 
 	eng := service.NewDispatchEngine("")
@@ -65,13 +71,9 @@ func TestDispatch_MultiPart_SignatureOnFirstOnly(t *testing.T) {
 		t.Fatalf("segmentation must produce multiple parts, got %d", len(parts))
 	}
 
-	// Signature only on first part
-	if !strings.HasPrefix(parts[0], "[bot] ") {
-		t.Errorf("signature must be prepended to first part: %q", parts[0])
-	}
-	for i, p := range parts[1:] {
+	for i, p := range parts {
 		if strings.Contains(p, "[bot]") {
-			t.Errorf("signature must NOT be on part %d: %q", i+1, p)
+			t.Errorf("MessageSignature must not be applied by bot_runtime, found it on part %d: %q", i, p)
 		}
 	}
 }
@@ -98,9 +100,9 @@ func TestDispatch_NoSegmentation_SinglePart(t *testing.T) {
 	if len(parts) != 1 {
 		t.Fatalf("disabled segmentation must produce exactly one part, got %d", len(parts))
 	}
-	want := "—signature full response here"
+	want := "full response here"
 	if parts[0] != want {
-		t.Errorf("parts[0] = %q, want %q", parts[0], want)
+		t.Errorf("parts[0] = %q, want %q (MessageSignature must not be applied by bot_runtime)", parts[0], want)
 	}
 }
 
@@ -143,32 +145,6 @@ func TestDispatch_Cancellation_ReturnsInterrupted(t *testing.T) {
 	}
 	if sent >= 5 {
 		t.Errorf("cancelled dispatch must not send all parts, sent = %d", sent)
-	}
-}
-
-func TestDispatch_EmptySignature_NoSuffix(t *testing.T) {
-	server, partsPtr, mu := collectParts(t)
-
-	eng := service.NewDispatchEngine("")
-	cfg := model.BotConfig{
-		TextSegmentationEnabled: false,
-		MessageSignature:        "", // empty — no suffix
-	}
-
-	if err := eng.Dispatch(context.Background(), 4, 4, "no signature here", cfg, server.URL); err != nil {
-		t.Fatalf("Dispatch returned unexpected error: %v", err)
-	}
-
-	mu.Lock()
-	parts := make([]string, len(*partsPtr))
-	copy(parts, *partsPtr)
-	mu.Unlock()
-
-	if len(parts) != 1 {
-		t.Fatalf("expected 1 part, got %d", len(parts))
-	}
-	if parts[0] != "no signature here" {
-		t.Errorf("parts[0] = %q, want %q (empty signature must not append anything)", parts[0], "no signature here")
 	}
 }
 

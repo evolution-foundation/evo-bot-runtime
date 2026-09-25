@@ -81,10 +81,10 @@ func (d *dispatchEngineImpl) Dispatch(
 
 	parts := segmentContent(residual, cfg)
 
-	// Prepend signature to the first part (FR-21)
-	if cfg.MessageSignature != "" && len(parts) > 0 {
-		parts[0] = cfg.MessageSignature + parts[0]
-	}
+	// FR-21's agent-bot display-name prefix is no longer applied here: the CRM
+	// now applies it once, centrally, for every outgoing AgentBot message
+	// (including this postback), so doing it here too would double-prefix it.
+	// cfg.MessageSignature is kept on BotConfig for callers that still read it.
 
 	start := time.Now()
 
