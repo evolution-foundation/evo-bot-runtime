@@ -276,13 +276,14 @@ func (s *pipelineService) resetDebounce(ctx context.Context, event *model.Messag
 // Process/resetDebounce, it never appends to the buffer, never starts a new
 // debounce window, and never interrupts StageAI/StageDispatch — a presence
 // pulse alone must not cancel a reply already being generated or sent.
+// Deliberately does NOT take the per-pair lock Process/resetDebounce use:
+// this is a GetState + idempotent SETEX, and losing a race against a real
+// message would otherwise risk that message being dropped (AcquireLock uses
+// WithTries(1), so a lock miss is not retried). Worst case if this races a
+// stage transition is a stale timer key on a pair that already advanced —
+// harmless, since advanceToAI re-checks TimerExists/Stage under its own lock
+// before doing anything with it.
 func (s *pipelineService) Presence(ctx context.Context, contactID, conversationID int64) error {
-	mu, err := s.repo.AcquireLock(ctx, contactID, conversationID)
-	if err != nil {
-		return brtErrors.ErrLockFailed
-	}
-	defer mu.Unlock()
-
 	state, err := s.repo.GetState(ctx, contactID, conversationID)
 	if err != nil {
 		return fmt.Errorf("pipeline.presence.get_state: %w", err)

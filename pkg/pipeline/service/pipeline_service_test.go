@@ -867,7 +867,16 @@ func TestPresence_NoopWhenNoActiveDebounce(t *testing.T) {
 	}
 }
 
+// Uses mockDebounce (not the real engine) so "no timer created" is provable
+// even for DebounceTime=0 configs: the real engine's setTimerIfConfigured
+// would no-op on DebounceTime=0 regardless of whether Presence's own
+// StageDebounce guard ran, which made the previous version of this test pass
+// even with that guard deleted. Also asserts the AI stage actually completed
+// and dispatched — proving Presence did not cancel the in-flight stage,
+// the other half of the requirement (renew nothing AND don't interrupt).
 func TestPresence_NoopDuringAIStage(t *testing.T) {
+	repo := setupRealRepo(t)
+	mockDeb := &mockDebounce{}
 	aiStarted := make(chan struct{})
 	aiRelease := make(chan struct{})
 	ai := &mockAIAdapter{callFn: func(ctx context.Context, req *aiModel.A2ARequest) (*aiModel.NormalizedResponse, error) {
@@ -875,9 +884,12 @@ func TestPresence_NoopDuringAIStage(t *testing.T) {
 		<-aiRelease
 		return &aiModel.NormalizedResponse{Content: "resposta"}, nil
 	}}
-	svc, rdb := setupSvcWithAIAndDispatch(t, ai, &mockDispatchEngine{dispatchFn: func(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig, postbackURL string) error {
+	dispatched := make(chan string, 1)
+	dispatch := &mockDispatchEngine{dispatchFn: func(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig, postbackURL string) error {
+		dispatched <- content
 		return nil
-	}})
+	}}
+	svc := &pipelineService{repo: repo, debounce: mockDeb, aiAdapter: ai, dispatchEng: dispatch}
 	clearPair(t, svc, 30002)
 	ctx := context.Background()
 
@@ -894,12 +906,18 @@ func TestPresence_NoopDuringAIStage(t *testing.T) {
 		t.Fatalf("Presence returned error during StageAI: %v", err)
 	}
 
-	// No debounce timer should have been created — StageAI is not StageDebounce.
-	exists := rdb.Exists(ctx, "bot_runtime:timer:30002:30002").Val()
-	if exists != 0 {
-		t.Errorf("Presence must not create a debounce timer during StageAI")
+	if mockDeb.renewCalled {
+		t.Error("Presence must not renew the debounce timer during StageAI (nothing to renew)")
 	}
 
-	close(aiRelease) // let the AI stage finish so the goroutine doesn't leak past the test
-	time.Sleep(50 * time.Millisecond)
+	close(aiRelease) // let the AI stage finish and reach dispatch
+
+	select {
+	case content := <-dispatched:
+		if content != "resposta" {
+			t.Errorf("dispatched content = %q, want %q", content, "resposta")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AI stage never reached dispatch — Presence may have cancelled the in-flight stage")
+	}
 }
