@@ -152,3 +152,47 @@ func TestTimerExists_ReturnsFalseAfterExpiry(t *testing.T) {
 		t.Error("timer must be expired after TTL")
 	}
 }
+
+func TestRenewTimer_ExtendsTTLWithoutTouchingBuffer(t *testing.T) {
+	eng, rdb := setupEngine(t)
+	ctx := context.Background()
+	cfg := model.BotConfig{DebounceTime: 5}
+
+	if err := eng.Start(ctx, 6, 6, "first message", nil, cfg); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	// Let some of the TTL elapse so renewal is observable.
+	time.Sleep(200 * time.Millisecond)
+
+	if err := eng.RenewTimer(ctx, 6, 6, cfg); err != nil {
+		t.Fatalf("RenewTimer returned error: %v", err)
+	}
+
+	ttl := rdb.TTL(ctx, "bot_runtime:timer:6:6").Val()
+	if ttl <= 4*time.Second || ttl > 5*time.Second {
+		t.Errorf("timer TTL should be renewed to ~5s, got %v", ttl)
+	}
+
+	buffer, err := eng.GetBuffer(ctx, 6, 6)
+	if err != nil {
+		t.Fatalf("GetBuffer returned error: %v", err)
+	}
+	if buffer != "first message" {
+		t.Errorf("buffer should be unchanged by RenewTimer, got %q", buffer)
+	}
+}
+
+func TestRenewTimer_NoopWhenDebounceTimeIsZero(t *testing.T) {
+	eng, rdb := setupEngine(t)
+	ctx := context.Background()
+
+	if err := eng.RenewTimer(ctx, 7, 7, model.BotConfig{DebounceTime: 0}); err != nil {
+		t.Fatalf("RenewTimer returned error: %v", err)
+	}
+
+	exists := rdb.Exists(ctx, "bot_runtime:timer:7:7").Val()
+	if exists != 0 {
+		t.Errorf("no timer key should have been created for DebounceTime=0")
+	}
+}

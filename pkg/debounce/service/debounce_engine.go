@@ -14,6 +14,10 @@ import (
 type DebounceEngine interface {
 	Start(ctx context.Context, contactID, conversationID int64, content string, atts []model.Attachment, cfg model.BotConfig) error
 	Reset(ctx context.Context, contactID, conversationID int64, content string, atts []model.Attachment, cfg model.BotConfig) error
+	// RenewTimer extends the debounce timer TTL without touching the buffer or
+	// attachments — used when a presence ("customer is typing") signal arrives
+	// mid-debounce, as opposed to Reset which is for an actual new message.
+	RenewTimer(ctx context.Context, contactID, conversationID int64, cfg model.BotConfig) error
 	GetBuffer(ctx context.Context, contactID, conversationID int64) (string, error)
 	GetAttachments(ctx context.Context, contactID, conversationID int64) ([]model.Attachment, error)
 	TimerExists(ctx context.Context, contactID, conversationID int64) (bool, error)
@@ -35,13 +39,7 @@ func (d *debounceEngine) Start(ctx context.Context, contactID, conversationID in
 	if err := d.repo.AppendAttachments(ctx, contactID, conversationID, atts); err != nil {
 		return fmt.Errorf("debounce.start.append_attachments: %w", err)
 	}
-	if cfg.DebounceTime > 0 {
-		ttl := time.Duration(cfg.DebounceTime) * time.Second
-		if err := d.repo.SetTimer(ctx, contactID, conversationID, ttl); err != nil {
-			return fmt.Errorf("debounce.start.set_timer: %w", err)
-		}
-	}
-	return nil
+	return d.setTimerIfConfigured(ctx, contactID, conversationID, cfg, "start")
 }
 
 func (d *debounceEngine) Reset(ctx context.Context, contactID, conversationID int64, content string, atts []model.Attachment, cfg model.BotConfig) error {
@@ -51,11 +49,22 @@ func (d *debounceEngine) Reset(ctx context.Context, contactID, conversationID in
 	if err := d.repo.AppendAttachments(ctx, contactID, conversationID, atts); err != nil {
 		return fmt.Errorf("debounce.reset.append_attachments: %w", err)
 	}
-	if cfg.DebounceTime > 0 {
-		ttl := time.Duration(cfg.DebounceTime) * time.Second
-		if err := d.repo.SetTimer(ctx, contactID, conversationID, ttl); err != nil {
-			return fmt.Errorf("debounce.reset.set_timer: %w", err)
-		}
+	return d.setTimerIfConfigured(ctx, contactID, conversationID, cfg, "reset")
+}
+
+func (d *debounceEngine) RenewTimer(ctx context.Context, contactID, conversationID int64, cfg model.BotConfig) error {
+	return d.setTimerIfConfigured(ctx, contactID, conversationID, cfg, "renew_timer")
+}
+
+// setTimerIfConfigured is the timer-setting logic shared by Start, Reset and
+// RenewTimer — a no-op when DebounceTime <= 0 (pass-through mode).
+func (d *debounceEngine) setTimerIfConfigured(ctx context.Context, contactID, conversationID int64, cfg model.BotConfig, op string) error {
+	if cfg.DebounceTime <= 0 {
+		return nil
+	}
+	ttl := time.Duration(cfg.DebounceTime) * time.Second
+	if err := d.repo.SetTimer(ctx, contactID, conversationID, ttl); err != nil {
+		return fmt.Errorf("debounce.%s.set_timer: %w", op, err)
 	}
 	return nil
 }
