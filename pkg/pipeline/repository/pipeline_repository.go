@@ -28,6 +28,11 @@ type PipelineRepository interface {
 	GetAttachments(ctx context.Context, contactID, conversationID int64) ([]model.Attachment, error)
 
 	SetTimer(ctx context.Context, contactID, conversationID int64, ttl time.Duration) error
+	// RenewTimerIfExists extends the timer TTL only if the key is already
+	// present — it never creates one. Returns whether it actually renewed,
+	// so a caller can tell "renewed" apart from "nothing to renew" (the
+	// timer already expired, or the debounce window never started).
+	RenewTimerIfExists(ctx context.Context, contactID, conversationID int64, ttl time.Duration) (bool, error)
 	DeleteTimer(ctx context.Context, contactID, conversationID int64) error
 	TimerExists(ctx context.Context, contactID, conversationID int64) (bool, error)
 

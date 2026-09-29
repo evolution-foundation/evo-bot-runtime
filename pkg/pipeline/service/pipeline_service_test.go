@@ -55,6 +55,7 @@ var _ dispatchIface.DispatchEngine = (*mockDispatchEngine)(nil) // compile-time 
 type mockDebounce struct {
 	startCalled bool
 	resetCalled bool
+	renewCalled bool
 	startErr    error
 }
 
@@ -67,6 +68,10 @@ func (m *mockDebounce) Start(_ context.Context, _, _ int64, _ string, _ []model.
 }
 func (m *mockDebounce) Reset(_ context.Context, _, _ int64, _ string, _ []model.Attachment, _ model.BotConfig) error {
 	m.resetCalled = true
+	return nil
+}
+func (m *mockDebounce) RenewTimer(_ context.Context, _, _ int64, _ model.BotConfig) error {
+	m.renewCalled = true
 	return nil
 }
 func (m *mockDebounce) GetBuffer(_ context.Context, _, _ int64) (string, error) { return "", nil }
@@ -815,4 +820,104 @@ func clearPair(t *testing.T, svc *pipelineService, id int64) {
 	t.Cleanup(func() {
 		_ = svc.repo.ClearState(context.Background(), id, id)
 	})
+}
+
+func TestPresence_RenewsTimerWhenDebounceActive(t *testing.T) {
+	svc, rdb := setupSvcWithAIAndDispatch(t, &mockAIAdapter{}, &mockDispatchEngine{})
+	clearPair(t, svc, 30000)
+	ctx := context.Background()
+	cfg := model.BotConfig{DebounceTime: 5}
+
+	event := &model.MessageEvent{
+		ContactID: 30000, ConversationID: 30000, MessageContent: "oi",
+		BotConfig: cfg, PostbackURL: "http://example.com/postback",
+	}
+	if err := svc.Process(ctx, event); err != nil {
+		t.Fatalf("Process (start debounce) returned error: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	if err := svc.Presence(ctx, 30000, 30000); err != nil {
+		t.Fatalf("Presence returned error: %v", err)
+	}
+
+	ttl := rdb.TTL(ctx, "bot_runtime:timer:30000:30000").Val()
+	if ttl <= 4*time.Second || ttl > 5*time.Second {
+		t.Errorf("timer TTL should be renewed to ~5s, got %v", ttl)
+	}
+
+	buffer, err := rdb.LRange(ctx, "bot_runtime:buffer:30000:30000", 0, -1).Result()
+	if err != nil {
+		t.Fatalf("LRange returned error: %v", err)
+	}
+	if len(buffer) != 1 || buffer[0] != "oi" {
+		t.Errorf("buffer should be unchanged by Presence, got %v", buffer)
+	}
+}
+
+func TestPresence_NoopWhenNoActiveDebounce(t *testing.T) {
+	svc, _ := setupSvcWithAIAndDispatch(t, &mockAIAdapter{}, &mockDispatchEngine{})
+	clearPair(t, svc, 30001)
+	ctx := context.Background()
+
+	// No Process call was ever made for this pair — no state exists.
+	if err := svc.Presence(ctx, 30001, 30001); err != nil {
+		t.Fatalf("Presence returned error for absent state: %v", err)
+	}
+}
+
+// Uses mockDebounce (not the real engine) so "no timer created" is provable
+// even for DebounceTime=0 configs: the real engine's setTimerIfConfigured
+// would no-op on DebounceTime=0 regardless of whether Presence's own
+// StageDebounce guard ran, which made the previous version of this test pass
+// even with that guard deleted. Also asserts the AI stage actually completed
+// and dispatched — proving Presence did not cancel the in-flight stage,
+// the other half of the requirement (renew nothing AND don't interrupt).
+func TestPresence_NoopDuringAIStage(t *testing.T) {
+	repo := setupRealRepo(t)
+	mockDeb := &mockDebounce{}
+	aiStarted := make(chan struct{})
+	aiRelease := make(chan struct{})
+	ai := &mockAIAdapter{callFn: func(ctx context.Context, req *aiModel.A2ARequest) (*aiModel.NormalizedResponse, error) {
+		close(aiStarted)
+		<-aiRelease
+		return &aiModel.NormalizedResponse{Content: "resposta"}, nil
+	}}
+	dispatched := make(chan string, 1)
+	dispatch := &mockDispatchEngine{dispatchFn: func(ctx context.Context, contactID, conversationID int64, content string, cfg model.BotConfig, postbackURL string) error {
+		dispatched <- content
+		return nil
+	}}
+	svc := &pipelineService{repo: repo, debounce: mockDeb, aiAdapter: ai, dispatchEng: dispatch}
+	clearPair(t, svc, 30002)
+	ctx := context.Background()
+
+	event := &model.MessageEvent{
+		ContactID: 30002, ConversationID: 30002, MessageContent: "oi",
+		BotConfig: model.BotConfig{DebounceTime: 0}, PostbackURL: "http://example.com/postback",
+	}
+	if err := svc.Process(ctx, event); err != nil {
+		t.Fatalf("Process (skip debounce, DebounceTime=0) returned error: %v", err)
+	}
+	<-aiStarted // now in StageAI
+
+	if err := svc.Presence(ctx, 30002, 30002); err != nil {
+		t.Fatalf("Presence returned error during StageAI: %v", err)
+	}
+
+	if mockDeb.renewCalled {
+		t.Error("Presence must not renew the debounce timer during StageAI (nothing to renew)")
+	}
+
+	close(aiRelease) // let the AI stage finish and reach dispatch
+
+	select {
+	case content := <-dispatched:
+		if content != "resposta" {
+			t.Errorf("dispatched content = %q, want %q", content, "resposta")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AI stage never reached dispatch — Presence may have cancelled the in-flight stage")
+	}
 }

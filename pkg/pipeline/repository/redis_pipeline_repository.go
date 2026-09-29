@@ -112,6 +112,14 @@ func (r *redisPipelineRepository) SetTimer(ctx context.Context, contactID, conve
 	return r.rdb.Set(ctx, timerKey(contactID, conversationID), "1", ttl).Err()
 }
 
+func (r *redisPipelineRepository) RenewTimerIfExists(ctx context.Context, contactID, conversationID int64, ttl time.Duration) (bool, error) {
+	ok, err := r.rdb.SetXX(ctx, timerKey(contactID, conversationID), "1", ttl).Result()
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
 func (r *redisPipelineRepository) DeleteTimer(ctx context.Context, contactID, conversationID int64) error {
 	return r.rdb.Del(ctx, timerKey(contactID, conversationID)).Err()
 }

@@ -46,6 +46,9 @@ func (m *mockRepo) GetAttachments(_ context.Context, _, _ int64) ([]model.Attach
 	return nil, nil
 }
 func (m *mockRepo) SetTimer(_ context.Context, _, _ int64, _ time.Duration) error { return nil }
+func (m *mockRepo) RenewTimerIfExists(_ context.Context, _, _ int64, _ time.Duration) (bool, error) {
+	return true, nil
+}
 func (m *mockRepo) DeleteTimer(_ context.Context, _, _ int64) error               { return nil }
 func (m *mockRepo) TimerExists(_ context.Context, _, _ int64) (bool, error)       { return false, nil }
 func (m *mockRepo) AcquireLock(_ context.Context, _, _ int64) (repository.Mutex, error) {
@@ -57,12 +60,20 @@ func (m *mockRepo) ScanStates(_ context.Context, _ int) ([]model.PairID, error) 
 func (m *mockRepo) Ping(_ context.Context) error { return m.pingErr }
 
 // mockSvc satisfies pipelineService.PipelineService for handler tests.
-type mockSvc struct{ processErr error }
+type mockSvc struct {
+	processErr    error
+	presenceErr   error
+	presenceCalls [][2]int64
+}
 
 func (m *mockSvc) Process(_ context.Context, _ *model.MessageEvent) error { return m.processErr }
-func (m *mockSvc) Cancel(_, _ int64) error                                { return nil }
-func (m *mockSvc) Start() error                                           { return nil }
-func (m *mockSvc) Shutdown(_ context.Context)                             {}
+func (m *mockSvc) Presence(_ context.Context, contactID, conversationID int64) error {
+	m.presenceCalls = append(m.presenceCalls, [2]int64{contactID, conversationID})
+	return m.presenceErr
+}
+func (m *mockSvc) Cancel(_, _ int64) error    { return nil }
+func (m *mockSvc) Start() error               { return nil }
+func (m *mockSvc) Shutdown(_ context.Context) {}
 
 var _ pipelineService.PipelineService = (*mockSvc)(nil)
 
@@ -316,5 +327,65 @@ func TestHealth_503_WhenRedisUnreachable(t *testing.T) {
 	}
 	if body["detail"] != "redis unreachable" {
 		t.Errorf("body.detail: got %q, want %q", body["detail"], "redis unreachable")
+	}
+}
+
+func TestHandlePresence_202_OnValidRequest(t *testing.T) {
+	svc := &mockSvc{}
+	r := setupRouter(&mockRepo{}, svc)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events/presence", bytes.NewReader([]byte(`{"contact_id":1,"conversation_id":1}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bot-Runtime-Secret", testSecret)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusAccepted)
+	}
+	if len(svc.presenceCalls) != 1 || svc.presenceCalls[0] != [2]int64{1, 1} {
+		t.Errorf("expected Presence(1, 1) to have been called, got %v", svc.presenceCalls)
+	}
+}
+
+func TestHandlePresence_202_EvenWhenPresenceFails(t *testing.T) {
+	// Presence failures are best-effort (see Global Constraints) — must never
+	// surface as a non-2xx to the caller.
+	svc := &mockSvc{presenceErr: errors.New("redis unavailable")}
+	r := setupRouter(&mockRepo{}, svc)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events/presence", bytes.NewReader([]byte(`{"contact_id":1,"conversation_id":1}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bot-Runtime-Secret", testSecret)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusAccepted)
+	}
+}
+
+func TestHandlePresence_400_OnMissingRequiredFields(t *testing.T) {
+	r := setupRouter(&mockRepo{}, &mockSvc{})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events/presence", bytes.NewReader([]byte(`{"contact_id":0,"conversation_id":1}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bot-Runtime-Secret", testSecret)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandlePresence_401_OnMissingSecret(t *testing.T) {
+	r := setupRouter(&mockRepo{}, &mockSvc{})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events/presence", bytes.NewReader([]byte(`{"contact_id":1,"conversation_id":1}`)))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusUnauthorized)
 	}
 }

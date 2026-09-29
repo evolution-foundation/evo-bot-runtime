@@ -25,6 +25,7 @@ func NewHandler(repo repository.PipelineRepository, svc pipelineService.Pipeline
 
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/events", SecretMiddleware(h.secret), h.handleEvent)
+	r.POST("/events/presence", SecretMiddleware(h.secret), h.handlePresence)
 	r.GET("/health", h.handleHealth)
 }
 
@@ -39,20 +40,35 @@ func (h *Handler) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-func (h *Handler) handleEvent(c *gin.Context) {
-	var event model.MessageEvent
-	if err := c.ShouldBindJSON(&event); err != nil {
+// validatable is any inbound event with post-JSON-bind semantic checks.
+type validatable interface {
+	Validate() error
+}
+
+// bindAndValidate binds the request body into event and runs its Validate.
+// On failure it writes the 400 response itself and returns false — the
+// caller returns immediately without doing any further work.
+func bindAndValidate[T validatable](c *gin.Context, event T) bool {
+	if err := c.ShouldBindJSON(event); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "invalid payload",
 			"code":  "ERR_INVALID_EVENT",
 		})
-		return
+		return false
 	}
 	if err := event.Validate(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": err.Error(),
 			"code":  "ERR_INVALID_EVENT",
 		})
+		return false
+	}
+	return true
+}
+
+func (h *Handler) handleEvent(c *gin.Context) {
+	var event model.MessageEvent
+	if !bindAndValidate(c, &event) {
 		return
 	}
 
@@ -73,6 +89,29 @@ func (h *Handler) handleEvent(c *gin.Context) {
 	}
 
 	go h.runProcess(event)
+
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
+}
+
+// handlePresence renews an in-flight debounce timer when the customer is
+// composing/recording. Unlike handleEvent, it does NOT persist StageIncoming
+// before processing — a presence pulse must never overwrite an active
+// StageAI/StageDispatch state, only ever renew StageDebounce. It always
+// responds 202 on a structurally valid payload: "accepted and renewed" and
+// "accepted and no-op" are not distinguished to the caller.
+func (h *Handler) handlePresence(c *gin.Context) {
+	var event model.PresenceEvent
+	if !bindAndValidate(c, &event) {
+		return
+	}
+
+	if err := h.svc.Presence(c.Request.Context(), event.ContactID, event.ConversationID); err != nil {
+		slog.Warn("pipeline.presence.failed",
+			"contact_id", event.ContactID,
+			"conversation_id", event.ConversationID,
+			"error", err,
+		)
+	}
 
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
 }

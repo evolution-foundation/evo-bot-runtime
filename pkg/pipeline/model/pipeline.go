@@ -73,13 +73,22 @@ type BotConfig struct {
 	DelayPerCharacter       float64 `json:"delay_per_character"` // ms per char between parts
 }
 
-// Validate checks semantic constraints on a MessageEvent after JSON binding.
-func (e *MessageEvent) Validate() error {
-	if e.ContactID <= 0 {
+// validatePairID checks the ContactID/ConversationID constraints shared by
+// every event type keyed on a (contact, conversation) pair.
+func validatePairID(contactID, conversationID int64) error {
+	if contactID <= 0 {
 		return errors.New("contact_id must be > 0")
 	}
-	if e.ConversationID <= 0 {
+	if conversationID <= 0 {
 		return errors.New("conversation_id must be > 0")
+	}
+	return nil
+}
+
+// Validate checks semantic constraints on a MessageEvent after JSON binding.
+func (e *MessageEvent) Validate() error {
+	if err := validatePairID(e.ContactID, e.ConversationID); err != nil {
+		return err
 	}
 	if e.PostbackURL == "" {
 		return errors.New("postback_url is required")
@@ -94,4 +103,17 @@ func (e *MessageEvent) Validate() error {
 		return errors.New("delay_per_character must be >= 0")
 	}
 	return nil
+}
+
+// PresenceEvent is the inbound "customer is typing" signal from evo-ai-crm's
+// presence webhook ingestion. Unlike MessageEvent, it carries no content —
+// it only ever renews an already-running debounce timer.
+type PresenceEvent struct {
+	ContactID      int64 `json:"contact_id"`
+	ConversationID int64 `json:"conversation_id"`
+}
+
+// Validate checks semantic constraints on a PresenceEvent after JSON binding.
+func (e *PresenceEvent) Validate() error {
+	return validatePairID(e.ContactID, e.ConversationID)
 }

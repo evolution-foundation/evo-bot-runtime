@@ -24,6 +24,10 @@ import (
 // PipelineService orchestrates the per-pair pipeline state machine.
 type PipelineService interface {
 	Process(ctx context.Context, event *model.MessageEvent) error
+	// Presence renews an already-running debounce timer when the customer is
+	// composing/recording — a no-op if no StageDebounce is active for this pair
+	// (nothing buffered yet, or the pipeline already advanced past debounce).
+	Presence(ctx context.Context, contactID, conversationID int64) error
 	Cancel(contactID, conversationID int64) error
 	Start() error
 	// Shutdown stops the polling goroutine and cancels all in-flight pipeline
@@ -264,6 +268,37 @@ func (s *pipelineService) resetDebounce(ctx context.Context, event *model.Messag
 	slog.Info("pipeline.debounce.reset",
 		"contact_id", event.ContactID,
 		"conversation_id", event.ConversationID,
+	)
+	return nil
+}
+
+// Presence renews the debounce timer for an active StageDebounce pair. Unlike
+// Process/resetDebounce, it never appends to the buffer, never starts a new
+// debounce window, and never interrupts StageAI/StageDispatch — a presence
+// pulse alone must not cancel a reply already being generated or sent.
+// Deliberately does NOT take the per-pair lock Process/resetDebounce use:
+// this is a GetState + idempotent SETEX, and losing a race against a real
+// message would otherwise risk that message being dropped (AcquireLock uses
+// WithTries(1), so a lock miss is not retried). Worst case if this races a
+// stage transition is a stale timer key on a pair that already advanced —
+// harmless, since advanceToAI re-checks TimerExists/Stage under its own lock
+// before doing anything with it.
+func (s *pipelineService) Presence(ctx context.Context, contactID, conversationID int64) error {
+	state, err := s.repo.GetState(ctx, contactID, conversationID)
+	if err != nil {
+		return fmt.Errorf("pipeline.presence.get_state: %w", err)
+	}
+	if state == nil || state.Stage != model.StageDebounce {
+		return nil
+	}
+
+	if err := s.debounce.RenewTimer(ctx, contactID, conversationID, state.BotConfig); err != nil {
+		return fmt.Errorf("pipeline.presence.renew_timer: %w", err)
+	}
+
+	slog.Info("pipeline.debounce.renewed_by_presence",
+		"contact_id", contactID,
+		"conversation_id", conversationID,
 	)
 	return nil
 }
