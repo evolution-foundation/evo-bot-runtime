@@ -46,6 +46,9 @@ func (m *mockRepo) GetAttachments(_ context.Context, _, _ int64) ([]model.Attach
 	return nil, nil
 }
 func (m *mockRepo) SetTimer(_ context.Context, _, _ int64, _ time.Duration) error { return nil }
+func (m *mockRepo) RenewTimerIfExists(_ context.Context, _, _ int64, _ time.Duration) (bool, error) {
+	return true, nil
+}
 func (m *mockRepo) DeleteTimer(_ context.Context, _, _ int64) error               { return nil }
 func (m *mockRepo) TimerExists(_ context.Context, _, _ int64) (bool, error)       { return false, nil }
 func (m *mockRepo) AcquireLock(_ context.Context, _, _ int64) (repository.Mutex, error) {

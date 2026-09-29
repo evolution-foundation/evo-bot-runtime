@@ -196,3 +196,24 @@ func TestRenewTimer_NoopWhenDebounceTimeIsZero(t *testing.T) {
 		t.Errorf("no timer key should have been created for DebounceTime=0")
 	}
 }
+
+// Sourcery finding on PR #12: RenewTimer must never resurrect a timer key
+// that has already expired (or was never started) — otherwise a presence
+// pulse landing in the poller's detection window could indefinitely
+// postpone a reply the pipeline had already decided to send.
+func TestRenewTimer_DoesNotResurrectAnExpiredTimer(t *testing.T) {
+	eng, rdb := setupEngine(t)
+	ctx := context.Background()
+	cfg := model.BotConfig{DebounceTime: 5}
+
+	// No Start() call for this pair — the timer key was never created
+	// (equivalent to: it already expired and nothing has recreated it yet).
+	if err := eng.RenewTimer(ctx, 8, 8, cfg); err != nil {
+		t.Fatalf("RenewTimer returned error: %v", err)
+	}
+
+	exists := rdb.Exists(ctx, "bot_runtime:timer:8:8").Val()
+	if exists != 0 {
+		t.Error("RenewTimer must not create a timer key that didn't already exist")
+	}
+}

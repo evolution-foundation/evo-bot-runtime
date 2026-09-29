@@ -52,21 +52,43 @@ func (d *debounceEngine) Reset(ctx context.Context, contactID, conversationID in
 	return d.setTimerIfConfigured(ctx, contactID, conversationID, cfg, "reset")
 }
 
+// RenewTimer extends an already-running timer only — unlike Start/Reset, it
+// must never create one. A presence pulse landing in the ~100ms window after
+// pollDebounceExpiry sees the key gone (but before it advances the pair to
+// StageAI) must not resurrect that window and indefinitely postpone the reply
+// (Sourcery finding on evolution-foundation/evo-bot-runtime#12).
 func (d *debounceEngine) RenewTimer(ctx context.Context, contactID, conversationID int64, cfg model.BotConfig) error {
-	return d.setTimerIfConfigured(ctx, contactID, conversationID, cfg, "renew_timer")
+	ttl, ok := d.timerTTLIfConfigured(cfg)
+	if !ok {
+		return nil
+	}
+	if _, err := d.repo.RenewTimerIfExists(ctx, contactID, conversationID, ttl); err != nil {
+		return fmt.Errorf("debounce.renew_timer.renew_timer_if_exists: %w", err)
+	}
+	return nil
 }
 
 // setTimerIfConfigured is the timer-setting logic shared by Start, Reset and
 // RenewTimer — a no-op when DebounceTime <= 0 (pass-through mode).
 func (d *debounceEngine) setTimerIfConfigured(ctx context.Context, contactID, conversationID int64, cfg model.BotConfig, op string) error {
-	if cfg.DebounceTime <= 0 {
+	ttl, ok := d.timerTTLIfConfigured(cfg)
+	if !ok {
 		return nil
 	}
-	ttl := time.Duration(cfg.DebounceTime) * time.Second
 	if err := d.repo.SetTimer(ctx, contactID, conversationID, ttl); err != nil {
 		return fmt.Errorf("debounce.%s.set_timer: %w", op, err)
 	}
 	return nil
+}
+
+// timerTTLIfConfigured is the DebounceTime<=0 pass-through check shared by
+// every timer-setting path (Start, Reset, RenewTimer) — ok is false when
+// there's no timer to set/renew at all.
+func (d *debounceEngine) timerTTLIfConfigured(cfg model.BotConfig) (ttl time.Duration, ok bool) {
+	if cfg.DebounceTime <= 0 {
+		return 0, false
+	}
+	return time.Duration(cfg.DebounceTime) * time.Second, true
 }
 
 func (d *debounceEngine) GetBuffer(ctx context.Context, contactID, conversationID int64) (string, error) {

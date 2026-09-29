@@ -298,3 +298,51 @@ func TestAcquireLock_Contention(t *testing.T) {
 		t.Errorf("expected exactly 1 goroutine to fail with ErrLockFailed, got %d failures (results: %v)", failures, results)
 	}
 }
+
+// Sourcery finding on PR #12: RenewTimer must never resurrect an expired/
+// deleted timer key. If the poller already saw the key gone and is about to
+// advance the pair to StageAI, a presence pulse landing in that window must
+// not recreate the key and indefinitely postpone the reply.
+func TestRenewTimerIfExists_NoopWhenKeyAbsent(t *testing.T) {
+	repo, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	var contactID, convID int64 = 103, 203
+
+	renewed, err := repo.RenewTimerIfExists(ctx, contactID, convID, 5*time.Second)
+	if err != nil {
+		t.Fatalf("RenewTimerIfExists: %v", err)
+	}
+	if renewed {
+		t.Error("expected renewed=false when no timer key exists")
+	}
+
+	exists, err := repo.TimerExists(ctx, contactID, convID)
+	if err != nil {
+		t.Fatalf("TimerExists: %v", err)
+	}
+	if exists {
+		t.Error("RenewTimerIfExists must not create a timer key that didn't already exist")
+	}
+}
+
+func TestRenewTimerIfExists_ExtendsExistingKey(t *testing.T) {
+	repo, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	var contactID, convID int64 = 104, 204
+
+	if err := repo.SetTimer(ctx, contactID, convID, 1*time.Second); err != nil {
+		t.Fatalf("SetTimer: %v", err)
+	}
+
+	renewed, err := repo.RenewTimerIfExists(ctx, contactID, convID, 5*time.Second)
+	if err != nil {
+		t.Fatalf("RenewTimerIfExists: %v", err)
+	}
+	if !renewed {
+		t.Error("expected renewed=true when the timer key already exists")
+	}
+}
