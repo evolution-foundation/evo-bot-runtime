@@ -816,3 +816,81 @@ func clearPair(t *testing.T, svc *pipelineService, id int64) {
 		_ = svc.repo.ClearState(context.Background(), id, id)
 	})
 }
+
+func capturingHeadersAI() (*mockAIAdapter, chan map[string]string) {
+	got := make(chan map[string]string, 1)
+	return &mockAIAdapter{
+		callFn: func(_ context.Context, req *aiModel.A2ARequest) (*aiModel.NormalizedResponse, error) {
+			got <- req.ProcessorHeaders
+			return &aiModel.NormalizedResponse{Content: "ok"}, nil
+		},
+	}, got
+}
+
+func expectHeaders(t *testing.T, got chan map[string]string, want string) {
+	t.Helper()
+	select {
+	case headers := <-got:
+		if headers["X-Request-Context"] != want {
+			t.Errorf("A2ARequest.ProcessorHeaders = %v, want X-Request-Context %q", headers, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("AI adapter was never called")
+	}
+}
+
+func TestProcess_ForwardsEventProcessorHeadersToAIRequest(t *testing.T) {
+	ai, got := capturingHeadersAI()
+	svc, _ := setupSvcWithAI(t, ai)
+	clearPair(t, svc, 851)
+
+	event := &model.MessageEvent{
+		ContactID: 851, ConversationID: 851,
+		MessageContent:   "oi",
+		ProcessorHeaders: map[string]string{"X-Request-Context": "ctx-851"},
+		BotConfig:        model.BotConfig{DebounceTime: 0},
+	}
+	if err := svc.Process(context.Background(), event); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	expectHeaders(t, got, "ctx-851")
+}
+
+// The debounce path keeps the headers in Redis, so a pair recovered after a
+// restart still authenticates against the processor.
+func TestStart_Recovery_KeepsProcessorHeaders(t *testing.T) {
+	ai, got := capturingHeadersAI()
+	svc, _ := setupSvcWithAI(t, ai)
+	ctx := context.Background()
+	clearPair(t, svc, 852)
+
+	event := &model.MessageEvent{
+		ContactID: 852, ConversationID: 852,
+		MessageContent:   "oi",
+		ProcessorHeaders: map[string]string{"X-Request-Context": "ctx-852"},
+		BotConfig:        model.BotConfig{DebounceTime: 60},
+	}
+	if err := svc.Process(ctx, event); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	state, err := svc.repo.GetState(ctx, 852, 852)
+	if err != nil || state == nil {
+		t.Fatalf("GetState: state=%v err=%v", state, err)
+	}
+	if state.ProcessorHeaders["X-Request-Context"] != "ctx-852" {
+		t.Fatalf("persisted ProcessorHeaders = %v, want X-Request-Context %q", state.ProcessorHeaders, "ctx-852")
+	}
+
+	// Simulate the restart: the in-memory entry is gone and the timer expired.
+	if v, ok := svc.entries.LoadAndDelete(pairKey(852, 852)); ok {
+		v.(pipelineEntry).cancel()
+	}
+	if err := svc.repo.DeleteTimer(ctx, 852, 852); err != nil {
+		t.Fatalf("DeleteTimer: %v", err)
+	}
+
+	if err := svc.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	expectHeaders(t, got, "ctx-852")
+}

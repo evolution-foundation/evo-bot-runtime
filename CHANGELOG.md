@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Caller headers on the AI Processor call**: an optional `processor_headers` map on the inbound event is set on the AI Processor request, and kept in the persisted pipeline state so a pair recovered after a restart still carries it. The headers go out only when `outgoing_url` has the scheme, host and port of `AI_PROCESSOR_URL`; any other destination, or an unset `AI_PROCESSOR_URL`, drops them with a warning. They cannot override `Content-Type` or `X-API-Key`, and invalid names or values are skipped. Absent, the call is unchanged.
+
 ## [v1.0.0-rc6] - 2026-07-04
 
 Restores agent conversation memory over a2a. The adapter keyed ADK sessions by numeric display ids instead of UUIDs, so the Processor's session key (`{contextId}_{agentID}`) never matched the persisted session — every message hit "404/500 Session not found" and started with zero history. Also makes dispatch media-aware and adds per-PR CI images for the review environment.

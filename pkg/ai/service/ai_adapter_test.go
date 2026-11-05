@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -227,5 +228,92 @@ func TestCall_NonOKStatus_ReturnsError(t *testing.T) {
 	_, err := adapter.Call(context.Background(), &aiModel.A2ARequest{OutgoingURL: server.URL, Message: "test", ApiKey: "key"})
 	if err == nil {
 		t.Fatal("expected error for non-200 response, got nil")
+	}
+}
+
+// headerCapture serves a minimal A2A reply and records the request headers.
+func headerCapture(t *testing.T) (*httptest.Server, func() http.Header) {
+	t.Helper()
+	got := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+		json.NewEncoder(w).Encode(aiModel.A2AResponse{
+			Result: &aiModel.A2AResult{Artifacts: []aiModel.A2AArtifact{{Parts: []aiModel.A2APart{{Type: "text", Text: "ok"}}}}},
+		})
+	}))
+	t.Cleanup(server.Close)
+	return server, func() http.Header {
+		select {
+		case h := <-got:
+			return h
+		case <-time.After(3 * time.Second):
+			t.Fatal("server was never called")
+			return nil
+		}
+	}
+}
+
+func callWithHeaders(t *testing.T, url string, headers map[string]string) {
+	t.Helper()
+	adapter := aiService.NewAIAdapter(30, 0, 0)
+	if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
+		OutgoingURL: url, Message: "test", ApiKey: "key", ProcessorHeaders: headers,
+	}); err != nil {
+		t.Fatalf("Call returned unexpected error: %v", err)
+	}
+}
+
+func TestCall_ProcessorHeaders_SentToTheProcessor(t *testing.T) {
+	server, received := headerCapture(t)
+	t.Setenv("AI_PROCESSOR_URL", server.URL)
+
+	callWithHeaders(t, server.URL+"/api/v1/a2a/agent-1", map[string]string{"X-Request-Context": "ctx-1"})
+
+	if got := received().Get("X-Request-Context"); got != "ctx-1" {
+		t.Errorf("X-Request-Context = %q, want %q", got, "ctx-1")
+	}
+}
+
+func TestCall_ProcessorHeaders_NotSentElsewhere(t *testing.T) {
+	server, received := headerCapture(t)
+	u, _ := url.Parse(server.URL)
+	cases := map[string]string{
+		"other host":   "http://processor.invalid:" + u.Port(),
+		"other port":   "http://" + u.Hostname() + ":1",
+		"other scheme": "https://" + u.Host,
+		"unset":        "",
+		"no host":      "processor:8000",
+	}
+	for name, processor := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AI_PROCESSOR_URL", processor)
+			callWithHeaders(t, server.URL+"/api/v1/a2a/agent-1", map[string]string{"X-Request-Context": "ctx-1"})
+			if got := received().Values("X-Request-Context"); len(got) != 0 {
+				t.Errorf("X-Request-Context = %v, want no header", got)
+			}
+		})
+	}
+}
+
+func TestCall_ProcessorHeaders_CannotOverrideTheAdaptersOwn(t *testing.T) {
+	server, received := headerCapture(t)
+	t.Setenv("AI_PROCESSOR_URL", server.URL)
+
+	callWithHeaders(t, server.URL, map[string]string{
+		"X-API-Key":    "from-event",
+		"Content-Type": "text/plain",
+		"Bad Name":     "x",
+		"X-Bad-Value":  "a\r\nX-Injected: 1",
+	})
+
+	h := received()
+	if got := h.Get("X-API-Key"); got != "key" {
+		t.Errorf("X-API-Key = %q, want the adapter's %q", got, "key")
+	}
+	if got := h.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if h.Get("X-Bad-Value") != "" || h.Get("X-Injected") != "" {
+		t.Errorf("invalid header value was sent: %v", h)
 	}
 }
