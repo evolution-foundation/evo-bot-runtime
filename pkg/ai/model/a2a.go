@@ -7,6 +7,7 @@ type A2ARequest struct {
 	ContactID      int64          // used for userId in JSON-RPC params
 	ConversationID int64          // used for contextId in JSON-RPC params
 	ApiKey         string         // used for X-API-Key header (per-event auth)
+	TenantID       string         // sent as X-Evo-Tenant-Id when set
 	Message        string         // aggregated buffer content (FR-15)
 	Metadata       map[string]any // CRM metadata passed through to processor (tools context)
 	Attachments    []Attachment   // EVO-2180: incoming media to forward as A2A file parts

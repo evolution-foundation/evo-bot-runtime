@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Tenant on the AI Processor call**: an optional `tenant_id` on the inbound event is sent to the AI Processor as `X-Evo-Tenant-Id`, and kept in the persisted pipeline state so a pair recovered after a restart still carries it. Absent or empty, no header is sent and the call is unchanged. The runtime applies no rule of its own: the caller decides whether the value goes on the event.
+
 ## [v1.0.0-rc6] - 2026-07-04
 
 Restores agent conversation memory over a2a. The adapter keyed ADK sessions by numeric display ids instead of UUIDs, so the Processor's session key (`{contextId}_{agentID}`) never matched the persisted session — every message hit "404/500 Session not found" and started with zero history. Also makes dispatch media-aware and adds per-PR CI images for the review environment.

@@ -33,6 +33,7 @@ type PipelineState struct {
 	PostbackURL string         `json:"postback_url,omitempty"`
 	AgentBotID  string         `json:"agent_bot_id,omitempty"`
 	ApiKey      string         `json:"api_key,omitempty"`
+	TenantID    string         `json:"tenant_id,omitempty"`
 	OutgoingURL string         `json:"outgoing_url,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 }
@@ -47,6 +48,7 @@ type MessageEvent struct {
 	MessageContent string         `json:"message_content"`
 	Attachments    []Attachment   `json:"attachments,omitempty"` // EVO-2180: incoming media (image/audio/…)
 	ApiKey         string         `json:"api_key"`
+	TenantID       string         `json:"tenant_id,omitempty"` // forwarded to the processor as X-Evo-Tenant-Id when set
 	OutgoingURL    string         `json:"outgoing_url"`
 	BotConfig      BotConfig      `json:"bot_config"`
 	PostbackURL    string         `json:"postback_url"`

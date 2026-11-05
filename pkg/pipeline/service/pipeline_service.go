@@ -38,6 +38,7 @@ type pipelineEntry struct {
 	postbackURL string          // carries PostbackURL from MessageEvent to dispatch stage
 	outgoingURL string          // carries OutgoingURL (full A2A endpoint) from MessageEvent to AI stage
 	apiKey      string          // carries ApiKey from MessageEvent to AI stage
+	tenantID    string          // carries TenantID from MessageEvent to AI stage
 	metadata    map[string]any  // carries Metadata from MessageEvent to AI stage (for tools context)
 }
 
@@ -98,6 +99,7 @@ func (s *pipelineService) Start() error {
 				postbackURL: state.PostbackURL,
 				outgoingURL: state.OutgoingURL,
 				apiKey:      state.ApiKey,
+				tenantID:    state.TenantID,
 				metadata:    state.Metadata,
 			})
 		}
@@ -167,6 +169,7 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		postbackURL: event.PostbackURL,
 		outgoingURL: event.OutgoingURL,
 		apiKey:      event.ApiKey,
+		tenantID:    event.TenantID,
 		metadata:    event.Metadata,
 	})
 
@@ -185,6 +188,7 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		PostbackURL: event.PostbackURL,
 		OutgoingURL: event.OutgoingURL,
 		ApiKey:      event.ApiKey,
+		TenantID:    event.TenantID,
 		Metadata:    event.Metadata,
 	}
 	if err := s.repo.SetState(ctx, event.ContactID, event.ConversationID, newState); err != nil {
@@ -212,6 +216,7 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 		postbackURL: event.PostbackURL,
 		outgoingURL: event.OutgoingURL,
 		apiKey:      event.ApiKey,
+		tenantID:    event.TenantID,
 		metadata:    event.Metadata,
 	})
 
@@ -370,12 +375,13 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 
 	// Retrieve outgoing_url, api_key and metadata from the pipeline entry.
 	key := pairKey(contactID, conversationID)
-	var outgoingURL, apiKey string
+	var outgoingURL, apiKey, tenantID string
 	var metadata map[string]any
 	if v, ok := s.entries.Load(key); ok {
 		if entry, ok := v.(pipelineEntry); ok {
 			outgoingURL = entry.outgoingURL
 			apiKey = entry.apiKey
+			tenantID = entry.tenantID
 			metadata = entry.metadata
 		}
 	}
@@ -396,6 +402,7 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 		ContactID:      contactID,
 		ConversationID: conversationID,
 		ApiKey:         apiKey,
+		TenantID:       tenantID,
 		Message:        buffer,
 		Metadata:       metadata,
 		Attachments:    aiAttachments,

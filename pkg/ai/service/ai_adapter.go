@@ -223,6 +223,9 @@ func (a *aiAdapter) doOnce(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", req.ApiKey)
+	if req.TenantID != "" {
+		httpReq.Header.Set("X-Evo-Tenant-Id", req.TenantID)
+	}
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {

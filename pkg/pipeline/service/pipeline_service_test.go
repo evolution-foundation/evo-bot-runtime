@@ -816,3 +816,81 @@ func clearPair(t *testing.T, svc *pipelineService, id int64) {
 		_ = svc.repo.ClearState(context.Background(), id, id)
 	})
 }
+
+func capturingTenantAI() (*mockAIAdapter, chan string) {
+	got := make(chan string, 1)
+	return &mockAIAdapter{
+		callFn: func(_ context.Context, req *aiModel.A2ARequest) (*aiModel.NormalizedResponse, error) {
+			got <- req.TenantID
+			return &aiModel.NormalizedResponse{Content: "ok"}, nil
+		},
+	}, got
+}
+
+func expectTenant(t *testing.T, got chan string, want string) {
+	t.Helper()
+	select {
+	case tenantID := <-got:
+		if tenantID != want {
+			t.Errorf("A2ARequest.TenantID = %q, want %q", tenantID, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("AI adapter was never called")
+	}
+}
+
+func TestProcess_ForwardsEventTenantIDToAIRequest(t *testing.T) {
+	ai, got := capturingTenantAI()
+	svc, _ := setupSvcWithAI(t, ai)
+	clearPair(t, svc, 851)
+
+	event := &model.MessageEvent{
+		ContactID: 851, ConversationID: 851,
+		MessageContent: "oi",
+		TenantID:       "tenant-851",
+		BotConfig:      model.BotConfig{DebounceTime: 0},
+	}
+	if err := svc.Process(context.Background(), event); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	expectTenant(t, got, "tenant-851")
+}
+
+// The debounce path keeps the tenant in Redis, so a pair recovered after a
+// restart still authenticates against the processor.
+func TestStart_Recovery_KeepsTenantID(t *testing.T) {
+	ai, got := capturingTenantAI()
+	svc, _ := setupSvcWithAI(t, ai)
+	ctx := context.Background()
+	clearPair(t, svc, 852)
+
+	event := &model.MessageEvent{
+		ContactID: 852, ConversationID: 852,
+		MessageContent: "oi",
+		TenantID:       "tenant-852",
+		BotConfig:      model.BotConfig{DebounceTime: 60},
+	}
+	if err := svc.Process(ctx, event); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	state, err := svc.repo.GetState(ctx, 852, 852)
+	if err != nil || state == nil {
+		t.Fatalf("GetState: state=%v err=%v", state, err)
+	}
+	if state.TenantID != "tenant-852" {
+		t.Fatalf("persisted TenantID = %q, want %q", state.TenantID, "tenant-852")
+	}
+
+	// Simulate the restart: the in-memory entry is gone and the timer expired.
+	if v, ok := svc.entries.LoadAndDelete(pairKey(852, 852)); ok {
+		v.(pipelineEntry).cancel()
+	}
+	if err := svc.repo.DeleteTimer(ctx, 852, 852); err != nil {
+		t.Fatalf("DeleteTimer: %v", err)
+	}
+
+	if err := svc.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	expectTenant(t, got, "tenant-852")
+}

@@ -229,3 +229,36 @@ func TestCall_NonOKStatus_ReturnsError(t *testing.T) {
 		t.Fatal("expected error for non-200 response, got nil")
 	}
 }
+
+func TestCall_ForwardsTenantID(t *testing.T) {
+	cases := []struct {
+		name     string
+		tenantID string
+		want     []string
+	}{
+		{name: "set", tenantID: "7c9e6679-7425-40de-944b-e07fc1f90ae7", want: []string{"7c9e6679-7425-40de-944b-e07fc1f90ae7"}},
+		{name: "empty", tenantID: "", want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Values("X-Evo-Tenant-Id")
+				json.NewEncoder(w).Encode(aiModel.A2AResponse{
+					Result: &aiModel.A2AResult{Artifacts: []aiModel.A2AArtifact{{Parts: []aiModel.A2APart{{Type: "text", Text: "ok"}}}}},
+				})
+			}))
+			defer server.Close()
+
+			adapter := aiService.NewAIAdapter(30, 0, 0)
+			if _, err := adapter.Call(context.Background(), &aiModel.A2ARequest{
+				OutgoingURL: server.URL, Message: "test", ApiKey: "key", TenantID: tc.tenantID,
+			}); err != nil {
+				t.Fatalf("Call returned unexpected error: %v", err)
+			}
+			if len(got) != len(tc.want) || (len(got) == 1 && got[0] != tc.want[0]) {
+				t.Errorf("X-Evo-Tenant-Id = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
