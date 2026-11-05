@@ -3,14 +3,14 @@ package model
 // A2ARequest carries the data needed to call AI Processor via JSON-RPC 2.0.
 // Fields are NOT serialised directly — the adapter builds the wire format.
 type A2ARequest struct {
-	OutgoingURL    string         // full A2A endpoint URL from agent_bot.outgoing_url
-	ContactID      int64          // used for userId in JSON-RPC params
-	ConversationID int64          // used for contextId in JSON-RPC params
-	ApiKey         string         // used for X-API-Key header (per-event auth)
-	TenantID       string         // sent as X-Evo-Tenant-Id when set
-	Message        string         // aggregated buffer content (FR-15)
-	Metadata       map[string]any // CRM metadata passed through to processor (tools context)
-	Attachments    []Attachment   // EVO-2180: incoming media to forward as A2A file parts
+	OutgoingURL      string            // full A2A endpoint URL from agent_bot.outgoing_url
+	ContactID        int64             // used for userId in JSON-RPC params
+	ConversationID   int64             // used for contextId in JSON-RPC params
+	ApiKey           string            // used for X-API-Key header (per-event auth)
+	ProcessorHeaders map[string]string // sent only when OutgoingURL is AI_PROCESSOR_URL
+	Message          string            // aggregated buffer content (FR-15)
+	Metadata         map[string]any    // CRM metadata passed through to processor (tools context)
+	Attachments      []Attachment      // EVO-2180: incoming media to forward as A2A file parts
 }
 
 // Attachment is an incoming media item (image/audio/…) the adapter downloads and

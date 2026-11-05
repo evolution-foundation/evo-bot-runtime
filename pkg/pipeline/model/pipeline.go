@@ -27,32 +27,33 @@ type PairID struct {
 // BotConfig and PostbackURL are persisted for StageDebounce so that the service can
 // reconstruct the pipelineEntry correctly after a restart (NFR-01 recovery).
 type PipelineState struct {
-	Stage       Stage          `json:"stage"`
-	CreatedAt   time.Time      `json:"created_at"`
-	BotConfig   BotConfig      `json:"bot_config,omitempty"`
-	PostbackURL string         `json:"postback_url,omitempty"`
-	AgentBotID  string         `json:"agent_bot_id,omitempty"`
-	ApiKey      string         `json:"api_key,omitempty"`
-	TenantID    string         `json:"tenant_id,omitempty"`
-	OutgoingURL string         `json:"outgoing_url,omitempty"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
+	Stage            Stage             `json:"stage"`
+	CreatedAt        time.Time         `json:"created_at"`
+	BotConfig        BotConfig         `json:"bot_config,omitempty"`
+	PostbackURL      string            `json:"postback_url,omitempty"`
+	AgentBotID       string            `json:"agent_bot_id,omitempty"`
+	ApiKey           string            `json:"api_key,omitempty"`
+	ProcessorHeaders map[string]string `json:"processor_headers,omitempty"`
+	OutgoingURL      string            `json:"outgoing_url,omitempty"`
+	Metadata         map[string]any    `json:"metadata,omitempty"`
 }
 
 // MessageEvent is the inbound payload from evo-ai-crm AgentBotListener.
 // All JSON tags are snake_case — matches the wire format exactly.
 type MessageEvent struct {
-	AgentBotID     string         `json:"agent_bot_id"`
-	ConversationID int64          `json:"conversation_id"`
-	ContactID      int64          `json:"contact_id"`
-	MessageID      string         `json:"message_id"`
-	MessageContent string         `json:"message_content"`
-	Attachments    []Attachment   `json:"attachments,omitempty"` // EVO-2180: incoming media (image/audio/…)
-	ApiKey         string         `json:"api_key"`
-	TenantID       string         `json:"tenant_id,omitempty"` // forwarded to the processor as X-Evo-Tenant-Id when set
-	OutgoingURL    string         `json:"outgoing_url"`
-	BotConfig      BotConfig      `json:"bot_config"`
-	PostbackURL    string         `json:"postback_url"`
-	Metadata       map[string]any `json:"metadata,omitempty"`
+	AgentBotID     string       `json:"agent_bot_id"`
+	ConversationID int64        `json:"conversation_id"`
+	ContactID      int64        `json:"contact_id"`
+	MessageID      string       `json:"message_id"`
+	MessageContent string       `json:"message_content"`
+	Attachments    []Attachment `json:"attachments,omitempty"` // EVO-2180: incoming media (image/audio/…)
+	ApiKey         string       `json:"api_key"`
+	// Extra headers for the AI Processor call, sent only when outgoing_url is AI_PROCESSOR_URL.
+	ProcessorHeaders map[string]string `json:"processor_headers,omitempty"`
+	OutgoingURL      string            `json:"outgoing_url"`
+	BotConfig        BotConfig         `json:"bot_config"`
+	PostbackURL      string            `json:"postback_url"`
+	Metadata         map[string]any    `json:"metadata,omitempty"`
 }
 
 // Attachment is an incoming media item forwarded by the CRM. The AI adapter

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Tenant on the AI Processor call**: an optional `tenant_id` on the inbound event is sent to the AI Processor as `X-Evo-Tenant-Id`, and kept in the persisted pipeline state so a pair recovered after a restart still carries it. Absent or empty, no header is sent and the call is unchanged. The runtime applies no rule of its own: the caller decides whether the value goes on the event.
+- **Caller headers on the AI Processor call**: an optional `processor_headers` map on the inbound event is set on the AI Processor request, and kept in the persisted pipeline state so a pair recovered after a restart still carries it. The headers go out only when `outgoing_url` has the scheme, host and port of `AI_PROCESSOR_URL`; any other destination, or an unset `AI_PROCESSOR_URL`, drops them with a warning. They cannot override `Content-Type` or `X-API-Key`, and invalid names or values are skipped. Absent, the call is unchanged.
 
 ## [v1.0.0-rc6] - 2026-07-04
 

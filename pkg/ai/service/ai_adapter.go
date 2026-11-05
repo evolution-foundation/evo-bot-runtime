@@ -20,6 +20,7 @@ import (
 
 	brtErrors "github.com/EvolutionAPI/evo-bot-runtime/internal/errors"
 	"github.com/EvolutionAPI/evo-bot-runtime/pkg/ai/model"
+	"golang.org/x/net/http/httpguts"
 )
 
 // maxResponseBytes caps the AI Processor response body to prevent OOM on oversized payloads.
@@ -55,6 +56,11 @@ const (
 // would be chosen by whoever sent the event, which is exactly who it must
 // constrain. Unset means no media is fetched.
 const mediaHostAllowlistEnv = "MEDIA_HOST_ALLOWLIST"
+
+// processorURLEnv is the AI Processor the event's processor_headers may reach.
+// outgoing_url is chosen per bot and can point anywhere, so the headers are sent
+// only when it has this URL's scheme, host and port.
+const processorURLEnv = "AI_PROCESSOR_URL"
 
 // maxBackoff caps the exponential backoff between retries so a large
 // AI_CALL_RETRY_BASE_MS or retry count cannot balloon the wait.
@@ -221,11 +227,9 @@ func (a *aiAdapter) doOnce(
 	if err != nil {
 		return nil, false, fmt.Errorf("pipeline.ai.new_request: %w", err)
 	}
+	applyProcessorHeaders(httpReq, req.ProcessorHeaders)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", req.ApiKey)
-	if req.TenantID != "" {
-		httpReq.Header.Set("X-Evo-Tenant-Id", req.TenantID)
-	}
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -650,4 +654,55 @@ func extractContactUUID(metadata map[string]any) string {
 		return ""
 	}
 	return id
+}
+
+// applyProcessorHeaders sets the event's processor_headers on the request when its
+// URL is AI_PROCESSOR_URL. Called before the adapter's own headers, so those win.
+func applyProcessorHeaders(httpReq *http.Request, headers map[string]string) {
+	if len(headers) == 0 {
+		return
+	}
+	processor := processorURL()
+	if processor == nil {
+		slog.Warn("pipeline.ai.processor_headers.dropped", "reason", processorURLEnv+" is unset or has no host")
+		return
+	}
+	if !sameOrigin(processor, httpReq.URL) {
+		slog.Warn("pipeline.ai.processor_headers.dropped", "reason", "outgoing_url is not the AI Processor", "host", httpReq.URL.Host)
+		return
+	}
+	for name, value := range headers {
+		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			slog.Warn("pipeline.ai.processor_headers.invalid", "header", name)
+			continue
+		}
+		httpReq.Header.Set(name, value)
+	}
+}
+
+func processorURL() *neturl.URL {
+	u, err := neturl.Parse(os.Getenv(processorURLEnv))
+	if err != nil || u.Hostname() == "" {
+		return nil
+	}
+	return u
+}
+
+func sameOrigin(a, b *neturl.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *neturl.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	}
+	return ""
 }

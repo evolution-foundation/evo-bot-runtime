@@ -32,14 +32,14 @@ type PipelineService interface {
 }
 
 type pipelineEntry struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	cfg         model.BotConfig // carries BotConfig from MessageEvent to dispatch stage
-	postbackURL string          // carries PostbackURL from MessageEvent to dispatch stage
-	outgoingURL string          // carries OutgoingURL (full A2A endpoint) from MessageEvent to AI stage
-	apiKey      string          // carries ApiKey from MessageEvent to AI stage
-	tenantID    string          // carries TenantID from MessageEvent to AI stage
-	metadata    map[string]any  // carries Metadata from MessageEvent to AI stage (for tools context)
+	ctx              context.Context
+	cancel           context.CancelFunc
+	cfg              model.BotConfig   // carries BotConfig from MessageEvent to dispatch stage
+	postbackURL      string            // carries PostbackURL from MessageEvent to dispatch stage
+	outgoingURL      string            // carries OutgoingURL (full A2A endpoint) from MessageEvent to AI stage
+	apiKey           string            // carries ApiKey from MessageEvent to AI stage
+	processorHeaders map[string]string // carries ProcessorHeaders from MessageEvent to AI stage
+	metadata         map[string]any    // carries Metadata from MessageEvent to AI stage (for tools context)
 }
 
 type pipelineService struct {
@@ -93,14 +93,14 @@ func (s *pipelineService) Start() error {
 		if _, alreadyExists := s.entries.Load(key); !alreadyExists {
 			pipelineCtx, cancel := context.WithCancel(context.Background())
 			s.entries.Store(key, pipelineEntry{
-				ctx:         pipelineCtx,
-				cancel:      cancel,
-				cfg:         state.BotConfig,
-				postbackURL: state.PostbackURL,
-				outgoingURL: state.OutgoingURL,
-				apiKey:      state.ApiKey,
-				tenantID:    state.TenantID,
-				metadata:    state.Metadata,
+				ctx:              pipelineCtx,
+				cancel:           cancel,
+				cfg:              state.BotConfig,
+				postbackURL:      state.PostbackURL,
+				outgoingURL:      state.OutgoingURL,
+				apiKey:           state.ApiKey,
+				processorHeaders: state.ProcessorHeaders,
+				metadata:         state.Metadata,
 			})
 		}
 
@@ -163,14 +163,14 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 	pipelineCtx, cancel := context.WithCancel(context.Background())
 	key := pairKey(event.ContactID, event.ConversationID)
 	s.entries.Store(key, pipelineEntry{
-		ctx:         pipelineCtx,
-		cancel:      cancel,
-		cfg:         event.BotConfig,
-		postbackURL: event.PostbackURL,
-		outgoingURL: event.OutgoingURL,
-		apiKey:      event.ApiKey,
-		tenantID:    event.TenantID,
-		metadata:    event.Metadata,
+		ctx:              pipelineCtx,
+		cancel:           cancel,
+		cfg:              event.BotConfig,
+		postbackURL:      event.PostbackURL,
+		outgoingURL:      event.OutgoingURL,
+		apiKey:           event.ApiKey,
+		processorHeaders: event.ProcessorHeaders,
+		metadata:         event.Metadata,
 	})
 
 	if err := s.debounce.Start(ctx, event.ContactID, event.ConversationID, event.MessageContent, event.Attachments, event.BotConfig); err != nil {
@@ -179,17 +179,17 @@ func (s *pipelineService) startDebounce(ctx context.Context, event *model.Messag
 		return fmt.Errorf("pipeline.debounce.start: %w", err)
 	}
 
-	// Persist BotConfig, PostbackURL, AgentBotID and ApiKey alongside the stage so that
+	// Persist BotConfig, PostbackURL, AgentBotID, ApiKey and ProcessorHeaders alongside the stage so that
 	// Start() recovery after a restart can reconstruct the pipelineEntry correctly (NFR-01).
 	newState := &model.PipelineState{
-		Stage:       model.StageDebounce,
-		CreatedAt:   time.Now(),
-		BotConfig:   event.BotConfig,
-		PostbackURL: event.PostbackURL,
-		OutgoingURL: event.OutgoingURL,
-		ApiKey:      event.ApiKey,
-		TenantID:    event.TenantID,
-		Metadata:    event.Metadata,
+		Stage:            model.StageDebounce,
+		CreatedAt:        time.Now(),
+		BotConfig:        event.BotConfig,
+		PostbackURL:      event.PostbackURL,
+		OutgoingURL:      event.OutgoingURL,
+		ApiKey:           event.ApiKey,
+		ProcessorHeaders: event.ProcessorHeaders,
+		Metadata:         event.Metadata,
 	}
 	if err := s.repo.SetState(ctx, event.ContactID, event.ConversationID, newState); err != nil {
 		cancel()
@@ -210,14 +210,14 @@ func (s *pipelineService) skipDebounce(ctx context.Context, event *model.Message
 	pipelineCtx, cancel := context.WithCancel(context.Background())
 	key := pairKey(event.ContactID, event.ConversationID)
 	s.entries.Store(key, pipelineEntry{
-		ctx:         pipelineCtx,
-		cancel:      cancel,
-		cfg:         event.BotConfig,
-		postbackURL: event.PostbackURL,
-		outgoingURL: event.OutgoingURL,
-		apiKey:      event.ApiKey,
-		tenantID:    event.TenantID,
-		metadata:    event.Metadata,
+		ctx:              pipelineCtx,
+		cancel:           cancel,
+		cfg:              event.BotConfig,
+		postbackURL:      event.PostbackURL,
+		outgoingURL:      event.OutgoingURL,
+		apiKey:           event.ApiKey,
+		processorHeaders: event.ProcessorHeaders,
+		metadata:         event.Metadata,
 	})
 
 	// debounce.Start appends to buffer; DebounceTime=0 means no timer (Story 2.1).
@@ -373,15 +373,16 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 	)
 	start := time.Now()
 
-	// Retrieve outgoing_url, api_key and metadata from the pipeline entry.
+	// Retrieve outgoing_url, api_key, processor headers and metadata from the pipeline entry.
 	key := pairKey(contactID, conversationID)
-	var outgoingURL, apiKey, tenantID string
+	var outgoingURL, apiKey string
+	var processorHeaders map[string]string
 	var metadata map[string]any
 	if v, ok := s.entries.Load(key); ok {
 		if entry, ok := v.(pipelineEntry); ok {
 			outgoingURL = entry.outgoingURL
 			apiKey = entry.apiKey
-			tenantID = entry.tenantID
+			processorHeaders = entry.processorHeaders
 			metadata = entry.metadata
 		}
 	}
@@ -398,14 +399,14 @@ func (s *pipelineService) runAIStage(ctx context.Context, contactID, conversatio
 	}
 
 	resp, err := s.aiAdapter.Call(ctx, &aiModel.A2ARequest{
-		OutgoingURL:    outgoingURL,
-		ContactID:      contactID,
-		ConversationID: conversationID,
-		ApiKey:         apiKey,
-		TenantID:       tenantID,
-		Message:        buffer,
-		Metadata:       metadata,
-		Attachments:    aiAttachments,
+		OutgoingURL:      outgoingURL,
+		ContactID:        contactID,
+		ConversationID:   conversationID,
+		ApiKey:           apiKey,
+		ProcessorHeaders: processorHeaders,
+		Message:          buffer,
+		Metadata:         metadata,
+		Attachments:      aiAttachments,
 	})
 	if err != nil {
 		switch {
